@@ -1,0 +1,300 @@
+mod parser;
+mod sessions;
+mod search;
+mod output;
+
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use regex::Regex;
+use serde_json::json;
+
+use crate::sessions::{discover_sessions, resolve_session};
+use crate::search::{search_sessions, SearchOptions};
+use crate::output::{format_match, format_summary};
+
+#[derive(Parser)]
+#[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Search Claude Code conversation transcripts
+    Search {
+        /// Pattern to search (literal string and/or regex)
+        pattern: String,
+
+        /// Search user messages
+        #[arg(short = 'u', long)]
+        user: bool,
+
+        /// Search assistant responses
+        #[arg(short = 'a', long)]
+        assistant: bool,
+
+        /// Search bash commands
+        #[arg(short = 'c', long = "bash-command")]
+        bash_command: bool,
+
+        /// Search bash output
+        #[arg(short = 'o', long = "bash-output")]
+        bash_output: bool,
+
+        /// Search tool use inputs
+        #[arg(short = 't', long = "tool-use")]
+        tool_use: bool,
+
+        /// Search tool results
+        #[arg(short = 'r', long = "tool-result")]
+        tool_result: bool,
+
+        /// Search subagent prompts
+        #[arg(short = 's', long = "subagent-prompt")]
+        subagent_prompt: bool,
+
+        /// Search compact/continuation summaries
+        #[arg(long = "compact-summary")]
+        compact_summary: bool,
+
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Specific session (UUID prefix, offset like -1, or "all")
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Context lines around matches
+        #[arg(short = 'C', long)]
+        context: Option<usize>,
+
+        /// Context lines before matches
+        #[arg(short = 'B', long = "before-context")]
+        before_context: Option<usize>,
+
+        /// Context lines after matches
+        #[arg(short = 'A', long = "after-context")]
+        after_context: Option<usize>,
+
+        /// Max results
+        #[arg(long, default_value = "50")]
+        max_results: usize,
+
+        /// Max output line width (0 = unlimited)
+        #[arg(long, default_value = "200")]
+        max_line_width: usize,
+
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Only print session IDs with matches
+        #[arg(short = 'l', long = "sessions-with-matches")]
+        sessions_with_matches: bool,
+
+        /// Case-insensitive search
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+    },
+
+    /// List sessions for a project
+    Sessions {
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Dump a session's content as plain text
+    Dump {
+        /// Session ID prefix, offset, or "all"
+        session: String,
+
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary)
+        #[arg(long, default_value = "user,assistant")]
+        targets: String,
+    },
+}
+
+fn all_targets() -> HashSet<String> {
+    [
+        "user", "assistant", "bash-command", "bash-output",
+        "tool-use", "tool-result", "subagent-prompt", "compact-summary",
+    ].iter().map(|s| s.to_string()).collect()
+}
+
+fn resolve_project(path: &PathBuf) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.clone())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn main() {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::Search {
+            pattern, user, assistant, bash_command, bash_output,
+            tool_use, tool_result, subagent_prompt, compact_summary,
+            project, session, context, before_context, after_context,
+            max_results, max_line_width, json, sessions_with_matches, ignore_case,
+        } => {
+            let project_path = resolve_project(&project);
+
+            let mut targets: HashSet<String> = HashSet::new();
+            if user { targets.insert("user".into()); }
+            if assistant { targets.insert("assistant".into()); }
+            if bash_command { targets.insert("bash-command".into()); }
+            if bash_output { targets.insert("bash-output".into()); }
+            if tool_use { targets.insert("tool-use".into()); }
+            if tool_result { targets.insert("tool-result".into()); }
+            if subagent_prompt { targets.insert("subagent-prompt".into()); }
+            if compact_summary { targets.insert("compact-summary".into()); }
+            if targets.is_empty() { targets = all_targets(); }
+
+            let flags = if ignore_case { "(?i)" } else { "" };
+            let escaped = regex::escape(&pattern);
+            let literal_pat = Regex::new(&format!("{}{}", flags, escaped))
+                .expect("invalid pattern");
+            let mut patterns = vec![literal_pat.clone()];
+            if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
+                if regex_pat.as_str() != literal_pat.as_str() {
+                    patterns.push(regex_pat);
+                }
+            }
+
+            let ctx = context.unwrap_or(0);
+            let options = SearchOptions {
+                patterns: patterns.clone(),
+                targets,
+                context_before: before_context.unwrap_or(ctx),
+                context_after: after_context.unwrap_or(ctx),
+                max_results,
+                max_line_width,
+                json_output: json,
+                sessions_with_matches,
+            };
+
+            let all_sessions = discover_sessions(&project_path, None);
+            if all_sessions.is_empty() {
+                eprintln!("No session files found for project {}", project_path);
+                std::process::exit(1);
+            }
+
+            let sessions = resolve_session(session.as_deref(), &all_sessions);
+            let matches = search_sessions(&sessions, &options);
+
+            if sessions_with_matches {
+                let mut seen = std::collections::HashSet::new();
+                for m in &matches {
+                    let path = sessions.iter()
+                        .find(|s| s.session_id == m.session_id)
+                        .map(|s| s.file_path.to_string_lossy().to_string())
+                        .unwrap_or_else(|| m.session_id.clone());
+                    if seen.insert(path.clone()) {
+                        println!("{}", path);
+                    }
+                }
+                if matches.is_empty() { std::process::exit(1); }
+            } else if json {
+                let output: Vec<_> = matches.iter().map(|m| json!({
+                    "matchNumber": m.match_number,
+                    "sessionId": m.session_id,
+                    "timestamp": m.timestamp,
+                    "target": m.target.as_str(),
+                    "toolName": m.tool_name,
+                    "matchedLines": m.matched_lines.iter().map(|ml| json!({
+                        "lineNumber": ml.line_number,
+                        "line": ml.line,
+                        "isMatch": ml.is_match,
+                    })).collect::<Vec<_>>(),
+                })).collect();
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                for (i, m) in matches.iter().enumerate() {
+                    if i > 0 { println!(); }
+                    println!("{}", format_match(m, &patterns, max_line_width));
+                }
+                println!("{}", format_summary(matches.len(), &project_path, sessions.len()));
+            }
+        }
+
+        Commands::Sessions { project, json } => {
+            let project_path = resolve_project(&project);
+            let sessions = discover_sessions(&project_path, None);
+
+            if sessions.is_empty() {
+                eprintln!("No sessions found for project {}", project_path);
+                std::process::exit(1);
+            }
+
+            if json {
+                let output: Vec<_> = sessions.iter().map(|s| {
+                    let mtime = s.mtime.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs()).unwrap_or(0);
+                    json!({
+                        "sessionId": s.session_id,
+                        "filePath": s.file_path.to_string_lossy(),
+                        "mtime": mtime,
+                        "isSubagent": s.is_subagent,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                let mut count = 0;
+                for s in &sessions {
+                    if s.is_subagent { continue; }
+                    let mtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
+                    println!("{} {}", mtime.format("%Y-%m-%d %H:%M:%S"), s.session_id);
+                    count += 1;
+                }
+                eprintln!("{} session{}", count, if count == 1 { "" } else { "s" });
+            }
+        }
+
+        Commands::Dump { session, project, targets } => {
+            let project_path = resolve_project(&project);
+            let target_set: HashSet<String> = targets.split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+
+            let all_sessions = discover_sessions(&project_path, None);
+            let sessions = resolve_session(Some(&session), &all_sessions);
+
+            if sessions.is_empty() {
+                eprintln!("No sessions found matching '{}'", session);
+                std::process::exit(1);
+            }
+
+            for s in &sessions {
+                let tool_use_map = parser::build_tool_use_map(&s.file_path);
+                let contents = parser::extract_content(
+                    &s.file_path,
+                    &tool_use_map,
+                    &target_set,
+                    &s.session_id,
+                    s.is_subagent,
+                );
+                for content in contents {
+                    let label = match &content.tool_name {
+                        Some(t) => format!("[{}:{}]", content.target.as_str(), t),
+                        None => format!("[{}]", content.target.as_str()),
+                    };
+                    println!("{} {}", label, content.text);
+                }
+            }
+        }
+    }
+}
