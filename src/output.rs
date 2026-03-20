@@ -6,6 +6,18 @@ const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 const BOLD_YELLOW: &str = "\x1b[1;33m";
 
+thread_local! {
+    static DID_TRUNCATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn reset_truncation_state() {
+    DID_TRUNCATE.with(|f| f.set(false));
+}
+
+pub fn get_did_truncate() -> bool {
+    DID_TRUNCATE.with(|f| f.get())
+}
+
 fn format_timestamp(ts: &str) -> String {
     if ts.is_empty() {
         return "unknown".to_string();
@@ -29,6 +41,8 @@ fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, b
     if max_width == 0 || line.len() <= max_width {
         return (line.to_string(), false);
     }
+
+    DID_TRUNCATE.with(|f| f.set(true));
 
     if let Some((match_start, match_len)) = first_match_pos(line, patterns) {
         let budget = max_width.saturating_sub(match_len);
@@ -95,5 +109,59 @@ pub fn format_summary(count: usize, project_path: &str, session_count: usize) ->
     } else {
         format!("\n{}\n{}{} match{} found.{}",
             project_info, DIM, count, if count == 1 { "" } else { "es" }, RESET)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_timestamp_iso() {
+        assert_eq!(format_timestamp("2024-01-15T10:30:00.000Z"), "2024-01-15 10:30:00");
+    }
+
+    #[test]
+    fn test_format_timestamp_empty() {
+        assert_eq!(format_timestamp(""), "unknown");
+    }
+
+    #[test]
+    fn test_truncate_line_no_truncation_needed() {
+        let pat = regex::Regex::new("foo").unwrap();
+        let (result, was_truncated) = truncate_line("short line", &[pat], 200);
+        assert_eq!(result, "short line");
+        assert!(!was_truncated);
+    }
+
+    #[test]
+    fn test_truncate_line_unlimited() {
+        let long = "x".repeat(500);
+        let pat = regex::Regex::new("x").unwrap();
+        let (result, was_truncated) = truncate_line(&long, &[pat], 0);
+        assert_eq!(result.len(), 500);
+        assert!(!was_truncated);
+    }
+
+    #[test]
+    fn test_truncate_line_centers_on_match() {
+        let line = format!("{}MATCH{}", "a".repeat(100), "b".repeat(100));
+        let pat = regex::Regex::new("MATCH").unwrap();
+        let (result, was_truncated) = truncate_line(&line, &[pat], 50);
+        assert!(was_truncated);
+        assert!(result.contains("MATCH"));
+        assert!(result.len() <= 50 + 6); // budget + "..." prefixes
+    }
+
+    #[test]
+    fn test_truncation_state_tracking() {
+        reset_truncation_state();
+        assert!(!get_did_truncate());
+        let long = format!("{}needle{}", "a".repeat(300), "b".repeat(300));
+        let pat = regex::Regex::new("needle").unwrap();
+        truncate_line(&long, &[pat], 100);
+        assert!(get_did_truncate());
+        reset_truncation_state();
+        assert!(!get_did_truncate());
     }
 }

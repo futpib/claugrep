@@ -299,3 +299,122 @@ fn extract_assistant(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+    use std::io::Write;
+
+    fn write_jsonl(lines: &[&str]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        for line in lines {
+            writeln!(f, "{}", line).unwrap();
+        }
+        f.flush().unwrap();
+        f
+    }
+
+    fn all_targets() -> HashSet<String> {
+        ["user", "assistant", "bash-command", "bash-output", "tool-use", "tool-result", "subagent-prompt", "compact-summary"]
+            .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn test_extract_user_text_message() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":"hello world"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"test-session"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "test-session", false);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].text, "hello world");
+        assert_eq!(contents[0].target, Target::User);
+    }
+
+    #[test]
+    fn test_extract_assistant_text() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].text, "hi there");
+        assert_eq!(contents[0].target, Target::Assistant);
+    }
+
+    #[test]
+    fn test_extract_bash_command() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls -la"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let bash = contents.iter().find(|c| c.target == Target::BashCommand);
+        assert!(bash.is_some());
+        assert_eq!(bash.unwrap().text, "ls -la");
+    }
+
+    #[test]
+    fn test_extract_bash_output() {
+        // First write a tool_use entry so we can map the ID
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"file1.txt\nfile2.txt"}]},"timestamp":"2024-01-01T00:00:01Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let output = contents.iter().find(|c| c.target == Target::BashOutput);
+        assert!(output.is_some());
+        assert!(output.unwrap().text.contains("file1.txt"));
+    }
+
+    #[test]
+    fn test_extract_compact_summary() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"Summary of prior conversation"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].target, Target::CompactSummary);
+    }
+
+    #[test]
+    fn test_extract_subagent_prompt() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":"Do the thing"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", true); // is_subagent=true
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].target, Target::SubagentPrompt);
+    }
+
+    #[test]
+    fn test_skips_malformed_lines() {
+        let f = write_jsonl(&[
+            "this is not json at all!!",
+            r#"{"type":"user","message":{"content":"valid"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        // Should parse the valid line and skip the malformed one
+        assert_eq!(contents.len(), 1);
+    }
+
+    #[test]
+    fn test_target_filtering() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"content":"user message"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let map = build_tool_use_map(f.path());
+        // Only user target
+        let user_only: HashSet<String> = ["user"].iter().map(|s| s.to_string()).collect();
+        let contents = extract_content(f.path(), &map, &user_only, "s", false);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].target, Target::User);
+    }
+}

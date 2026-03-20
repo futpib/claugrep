@@ -10,9 +10,9 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::{discover_sessions, resolve_session};
+use crate::sessions::{discover_sessions, resolve_session, get_worktree_paths};
 use crate::search::{search_sessions, SearchOptions};
-use crate::output::{format_match, format_summary};
+use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate};
 
 #[derive(Parser)]
 #[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
@@ -114,7 +114,8 @@ enum Commands {
 
     /// Dump a session's content as plain text
     Dump {
-        /// Session ID prefix, offset, or "all"
+        /// Session ID prefix, offset (e.g. -1 for previous, 0 for latest), or "all"
+        #[arg(allow_hyphen_values = true)]
         session: String,
 
         /// Project path (default: current directory)
@@ -187,7 +188,18 @@ fn main() {
                 sessions_with_matches,
             };
 
-            let all_sessions = discover_sessions(&project_path, None);
+            // Collect sessions from all git worktrees, deduplicating by file path
+            let worktree_paths = get_worktree_paths(&project_path);
+            let mut unique_paths: Vec<String> = worktree_paths;
+            if !unique_paths.contains(&project_path) {
+                unique_paths.push(project_path.clone());
+            }
+            let mut seen_paths = std::collections::HashSet::new();
+            let all_sessions: Vec<_> = unique_paths.iter()
+                .flat_map(|p| discover_sessions(p, None))
+                .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
+                .collect();
+
             if all_sessions.is_empty() {
                 eprintln!("No session files found for project {}", project_path);
                 std::process::exit(1);
@@ -223,11 +235,15 @@ fn main() {
                 })).collect();
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else {
+                reset_truncation_state();
                 for (i, m) in matches.iter().enumerate() {
                     if i > 0 { println!(); }
                     println!("{}", format_match(m, &patterns, max_line_width));
                 }
                 println!("{}", format_summary(matches.len(), &project_path, sessions.len()));
+                if get_did_truncate() {
+                    eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
+                }
             }
         }
 

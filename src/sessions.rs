@@ -97,6 +97,27 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
         .collect()
 }
 
+/// Returns all git worktree paths for the given directory, or just the directory itself
+/// if it is not a git repo or has no worktrees.
+pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
+    use std::process::Command;
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(cwd)
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let paths: Vec<String> = stdout
+                .lines()
+                .filter_map(|l| l.strip_prefix("worktree ").map(str::to_string))
+                .collect();
+            if paths.is_empty() { vec![cwd.to_string()] } else { paths }
+        }
+        _ => vec![cwd.to_string()],
+    }
+}
+
 pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> Vec<SessionFile> {
     let dir = project_dir(project_path);
 
@@ -270,4 +291,94 @@ pub fn resolve_session(selector: Option<&str>, sessions: &[SessionFile]) -> Vec<
         .filter(|s| s.session_id.starts_with(selector))
         .cloned()
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn mock_session(id: &str) -> SessionFile {
+        SessionFile {
+            session_id: id.to_string(),
+            file_path: std::path::PathBuf::from(format!("/tmp/{}.jsonl", id)),
+            mtime: SystemTime::UNIX_EPOCH,
+            is_subagent: false,
+        }
+    }
+
+    #[test]
+    fn test_encode_project_path() {
+        assert_eq!(encode_project_path("/home/alice"), "-home-alice");
+        assert_eq!(encode_project_path("/home/alice/code/my.project"), "-home-alice-code-my-project");
+        assert_eq!(encode_project_path("/"), "-");
+    }
+
+    #[test]
+    fn test_resolve_session_all() {
+        let sessions = vec![mock_session("aaa"), mock_session("bbb")];
+        let result = resolve_session(None, &sessions);
+        assert_eq!(result.len(), 2);
+        let result = resolve_session(Some("all"), &sessions);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn test_resolve_session_uuid_prefix() {
+        let sessions = vec![
+            mock_session("aabbccdd-0000-0000-0000-000000000000"),
+            mock_session("bbccddee-0000-0000-0000-000000000000"),
+        ];
+        let result = resolve_session(Some("aabb"), &sessions);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].session_id, "aabbccdd-0000-0000-0000-000000000000");
+    }
+
+    #[test]
+    fn test_resolve_session_positive_offset() {
+        let sessions = vec![
+            mock_session("old-session"),
+            mock_session("new-session"),
+        ];
+        // offset 1 = oldest (chronological first)
+        let result = resolve_session(Some("1"), &sessions);
+        assert_eq!(result.len(), 1);
+        // offset 2 = newest
+        let result2 = resolve_session(Some("2"), &sessions);
+        assert_eq!(result2.len(), 1);
+        assert_ne!(result[0].session_id, result2[0].session_id);
+    }
+
+    #[test]
+    fn test_resolve_session_negative_offset() {
+        let sessions = vec![
+            mock_session("old-session"),
+            mock_session("new-session"),
+        ];
+        // offset 0 = latest
+        let result0 = resolve_session(Some("0"), &sessions);
+        assert_eq!(result0.len(), 1);
+        // offset -1 = second latest = same as 0 when there are only 2
+        // (offset -1 means "one before latest", so index total-2)
+        let result_neg1 = resolve_session(Some("-1"), &sessions);
+        assert_eq!(result_neg1.len(), 1);
+        assert_ne!(result0[0].session_id, result_neg1[0].session_id);
+    }
+
+    #[test]
+    fn test_get_worktree_paths_non_git_dir() {
+        let paths = get_worktree_paths("/tmp");
+        assert_eq!(paths, vec!["/tmp".to_string()]);
+    }
+
+    #[test]
+    fn test_get_worktree_paths_git_repo() {
+        // When run from a git repo, should return at least one path
+        let cwd = std::env::current_dir().unwrap();
+        let paths = get_worktree_paths(&cwd.to_string_lossy());
+        assert!(!paths.is_empty());
+        for p in &paths {
+            assert!(p.starts_with('/'), "expected absolute path, got: {}", p);
+        }
+    }
 }

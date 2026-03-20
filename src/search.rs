@@ -121,3 +121,56 @@ pub fn search_sessions(sessions: &[SessionFile], options: &SearchOptions) -> Vec
 
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pat(s: &str) -> Regex {
+        Regex::new(s).unwrap()
+    }
+
+    #[test]
+    fn test_find_matches_basic() {
+        let result = find_matches("hello\nworld\nfoo", &[pat("world")], 0, 0);
+        let lines = result.unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].line, "world");
+        assert!(lines[0].is_match);
+    }
+
+    #[test]
+    fn test_find_matches_no_match() {
+        let result = find_matches("hello\nworld", &[pat("zzz")], 0, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_matches_with_context() {
+        let text = "line1\nline2\nmatch\nline4\nline5";
+        let result = find_matches(text, &[pat("match")], 1, 1).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].line, "line2");
+        assert!(!result[0].is_match);
+        assert_eq!(result[1].line, "match");
+        assert!(result[1].is_match);
+        assert_eq!(result[2].line, "line4");
+        assert!(!result[2].is_match);
+    }
+
+    #[test]
+    fn test_find_matches_multiple_patterns() {
+        let text = "apple\nbanana\ncherry";
+        let result = find_matches(text, &[pat("apple"), pat("cherry")], 0, 0).unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.iter().all(|l| l.is_match));
+    }
+
+    #[test]
+    fn test_find_matches_context_clamps_to_bounds() {
+        let text = "only\nmatch";
+        let result = find_matches(text, &[pat("only")], 10, 10).unwrap();
+        // context before line 0 is nothing, context after includes "match"
+        assert_eq!(result.len(), 2);
+    }
+}
