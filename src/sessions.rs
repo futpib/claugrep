@@ -118,6 +118,64 @@ pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
     }
 }
 
+/// Discover sessions across ALL project directories under ~/.claude/projects/
+pub fn discover_all_sessions() -> Vec<SessionFile> {
+    let home = dirs::home_dir().expect("no home dir");
+    let projects_root = home.join(".claude").join("projects");
+
+    let entries = match fs::read_dir(&projects_root) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut all = vec![];
+
+    for entry in entries.flatten() {
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let encoded = entry.file_name().to_string_lossy().to_string();
+            // Decode encoded project path (reverse of encode_project_path)
+            // We don't need to decode — just discover all .jsonl in this dir
+            let dir = projects_root.join(&encoded);
+            let inner = match fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = inner
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
+                .filter_map(|e| {
+                    let path = e.path();
+                    let mtime = fs::metadata(&path).ok()?.modified().ok()?;
+                    let sid = e.file_name().to_string_lossy().replace(".jsonl", "").to_string();
+                    Some((sid, path, mtime))
+                })
+                .collect();
+
+            for (sid, path, mtime) in &jsonl_files {
+                let path_str = path.to_string_lossy().to_string();
+                if seen_paths.insert(path_str) {
+                    all.push(SessionFile {
+                        session_id: sid.clone(),
+                        file_path: path.clone(),
+                        mtime: *mtime,
+                        is_subagent: false,
+                    });
+                    // Include subagents
+                    for sf in find_subagent_files(&dir, sid) {
+                        let sub_str = sf.file_path.to_string_lossy().to_string();
+                        if seen_paths.insert(sub_str) {
+                            all.push(sf);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    all
+}
+
 pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> Vec<SessionFile> {
     let dir = project_dir(project_path);
 

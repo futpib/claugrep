@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::{discover_sessions, resolve_session, get_worktree_paths};
+use crate::sessions::{discover_sessions, discover_all_sessions, resolve_session, get_worktree_paths};
 use crate::search::{search_sessions, SearchOptions};
 use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
 
@@ -118,9 +118,9 @@ enum Commands {
         #[arg(short = 'n', long = "last", default_value = "20")]
         count: usize,
 
-        /// Project path (default: current directory)
-        #[arg(long, default_value = ".")]
-        project: PathBuf,
+        /// Project path (default: all projects)
+        #[arg(long)]
+        project: Option<PathBuf>,
 
         /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary)
         #[arg(long, default_value = "user,assistant")]
@@ -271,24 +271,28 @@ fn main() {
         }
 
         Commands::Last { count, project, targets, max_line_width, json } => {
-            let project_path = resolve_project(&project);
             let target_set: HashSet<String> = targets.split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
 
-            let worktree_paths = get_worktree_paths(&project_path);
-            let mut unique_paths: Vec<String> = worktree_paths;
-            if !unique_paths.contains(&project_path) {
-                unique_paths.push(project_path.clone());
-            }
-            let mut seen_paths = std::collections::HashSet::new();
-            let all_sessions: Vec<_> = unique_paths.iter()
-                .flat_map(|p| discover_sessions(p, None))
-                .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
-                .collect();
+            let all_sessions: Vec<_> = if let Some(ref proj) = project {
+                let project_path = resolve_project(proj);
+                let worktree_paths = get_worktree_paths(&project_path);
+                let mut unique_paths: Vec<String> = worktree_paths;
+                if !unique_paths.contains(&project_path) {
+                    unique_paths.push(project_path.clone());
+                }
+                let mut seen_paths = std::collections::HashSet::new();
+                unique_paths.iter()
+                    .flat_map(|p| discover_sessions(p, None))
+                    .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
+                    .collect()
+            } else {
+                discover_all_sessions()
+            };
 
             if all_sessions.is_empty() {
-                eprintln!("No session files found for project {}", project_path);
+                eprintln!("No session files found");
                 std::process::exit(1);
             }
 
