@@ -1,4 +1,5 @@
 use crate::search::SearchMatch;
+use crate::parser::ExtractedContent;
 use regex::Regex;
 
 const RESET: &str = "\x1b[0m";
@@ -94,6 +95,37 @@ pub fn format_match(m: &SearchMatch, patterns: &[Regex], max_width: usize) -> St
     }
 
     lines.join("\n")
+}
+
+pub fn format_record(r: &ExtractedContent, max_width: usize) -> String {
+    let short_session = &r.session_id[..r.session_id.len().min(8)];
+    let time = format_timestamp(&r.timestamp);
+    let target = r.target.as_str();
+    let tool_suffix = r.tool_name.as_deref().map(|t| format!(":{}", t)).unwrap_or_default();
+    let header = format!("{}--- session={} | {} | {}{} ---{}",
+        CYAN, short_session, time, target, tool_suffix, RESET);
+
+    let text = if max_width == 0 || r.text.len() <= max_width {
+        r.text.clone()
+    } else {
+        DID_TRUNCATE.with(|f| f.set(true));
+        format!("{}...", &r.text[..max_width])
+    };
+
+    // Show first line only with ellipsis if multiline
+    let display = if let Some(nl) = text.find('\n') {
+        let first = &text[..nl];
+        let remaining = text[nl+1..].lines().count();
+        if remaining > 0 {
+            format!("{} {}[+{} more lines]{}", first, DIM, remaining, RESET)
+        } else {
+            first.to_string()
+        }
+    } else {
+        text
+    };
+
+    format!("{}\n{}", header, display)
 }
 
 pub fn format_summary(count: usize, project_path: &str, session_count: usize) -> String {

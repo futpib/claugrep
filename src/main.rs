@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::sessions::{discover_sessions, resolve_session, get_worktree_paths};
 use crate::search::{search_sessions, SearchOptions};
-use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate};
+use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
 
 #[derive(Parser)]
 #[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
@@ -106,6 +106,29 @@ enum Commands {
         /// Project path (default: current directory)
         #[arg(long, default_value = ".")]
         project: PathBuf,
+
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the last N records across all sessions, sorted by time
+    Last {
+        /// Number of records to show
+        #[arg(short = 'n', long = "last", default_value = "20")]
+        count: usize,
+
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary)
+        #[arg(long, default_value = "user,assistant")]
+        targets: String,
+
+        /// Max output line width (0 = unlimited)
+        #[arg(long, default_value = "200")]
+        max_line_width: usize,
 
         /// JSON output
         #[arg(long)]
@@ -244,6 +267,70 @@ fn main() {
                 if get_did_truncate() {
                     eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
                 }
+            }
+        }
+
+        Commands::Last { count, project, targets, max_line_width, json } => {
+            let project_path = resolve_project(&project);
+            let target_set: HashSet<String> = targets.split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+
+            let worktree_paths = get_worktree_paths(&project_path);
+            let mut unique_paths: Vec<String> = worktree_paths;
+            if !unique_paths.contains(&project_path) {
+                unique_paths.push(project_path.clone());
+            }
+            let mut seen_paths = std::collections::HashSet::new();
+            let all_sessions: Vec<_> = unique_paths.iter()
+                .flat_map(|p| discover_sessions(p, None))
+                .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
+                .collect();
+
+            if all_sessions.is_empty() {
+                eprintln!("No session files found for project {}", project_path);
+                std::process::exit(1);
+            }
+
+            // Collect all content across all sessions
+            let mut all_records: Vec<parser::ExtractedContent> = vec![];
+            for session in &all_sessions {
+                let tool_use_map = parser::build_tool_use_map(&session.file_path);
+                let contents = parser::extract_content(
+                    &session.file_path,
+                    &tool_use_map,
+                    &target_set,
+                    &session.session_id,
+                    session.is_subagent,
+                );
+                all_records.extend(contents);
+            }
+
+            // Sort by timestamp (ISO 8601 lexicographic order works)
+            all_records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+            // Take the last N
+            let start = all_records.len().saturating_sub(count);
+            let records = &all_records[start..];
+
+            if json {
+                let output: Vec<_> = records.iter().map(|r| serde_json::json!({
+                    "sessionId": r.session_id,
+                    "timestamp": r.timestamp,
+                    "target": r.target.as_str(),
+                    "toolName": r.tool_name,
+                    "text": r.text,
+                })).collect();
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                for r in records {
+                    println!("{}", format_record(r, max_line_width));
+                }
+                eprintln!("Showing {} of {} record{} across {} session{}",
+                    records.len(), all_records.len(),
+                    if all_records.len() == 1 { "" } else { "s" },
+                    all_sessions.len(),
+                    if all_sessions.len() == 1 { "" } else { "s" });
             }
         }
 
