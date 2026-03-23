@@ -118,6 +118,75 @@ pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
     }
 }
 
+/// Information about a single project directory.
+pub struct ProjectInfo {
+    /// Raw directory name under ~/.claude/projects/ (e.g. `-home-user-code-proj`)
+    pub encoded_path: String,
+    /// Best-effort decoded path: replace `-` with `/` (lossy for paths with original `-`)
+    pub decoded_path: String,
+    /// Number of top-level `.jsonl` session files
+    pub session_count: usize,
+    /// Most recent session file mtime, if any
+    pub latest_mtime: Option<std::time::SystemTime>,
+}
+
+/// List all project directories under ~/.claude/projects/.
+pub fn discover_projects() -> Vec<ProjectInfo> {
+    let home = dirs::home_dir().expect("no home dir");
+    let projects_root = home.join(".claude").join("projects");
+
+    let entries = match fs::read_dir(&projects_root) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut projects: Vec<ProjectInfo> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let encoded = e.file_name().to_string_lossy().to_string();
+            let dir = projects_root.join(&encoded);
+
+            let mut session_count = 0usize;
+            let mut latest_mtime: Option<std::time::SystemTime> = None;
+
+            if let Ok(inner) = fs::read_dir(&dir) {
+                for entry in inner.flatten() {
+                    if entry.file_name().to_string_lossy().ends_with(".jsonl") {
+                        session_count += 1;
+                        if let Ok(meta) = fs::metadata(entry.path()) {
+                            if let Ok(mtime) = meta.modified() {
+                                latest_mtime = Some(match latest_mtime {
+                                    None => mtime,
+                                    Some(prev) => prev.max(mtime),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            let decoded = encoded.replace('-', "/");
+
+            Some(ProjectInfo {
+                encoded_path: encoded,
+                decoded_path: decoded,
+                session_count,
+                latest_mtime,
+            })
+        })
+        .collect();
+
+    // Most-recently-active projects first
+    projects.sort_by(|a, b| {
+        let ta = a.latest_mtime.unwrap_or(std::time::UNIX_EPOCH);
+        let tb = b.latest_mtime.unwrap_or(std::time::UNIX_EPOCH);
+        tb.cmp(&ta)
+    });
+
+    projects
+}
+
 /// Discover sessions across ALL project directories under ~/.claude/projects/
 pub fn discover_all_sessions() -> Vec<SessionFile> {
     let home = dirs::home_dir().expect("no home dir");

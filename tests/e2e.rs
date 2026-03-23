@@ -739,3 +739,113 @@ fn test_dump_multi_targets() {
     assert!(text2.contains("DUMP_MT_BASH_OUT"),  "expected bash output");
     assert!(!text2.contains("DUMP_MT_USER_TEXT"), "user text should be excluded");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// projects subcommand
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_projects_lists_all_projects() {
+    let world = MockWorld::new();
+    // Use names without '-' so the lossy decode is perfect
+    let proj_a = world.project("projalpha");
+    let proj_b = world.project("projbeta");
+    proj_a.session("sess-pa").user_message("hello from alpha").done();
+    proj_b.session("sess-pb").user_message("hello from beta").done();
+
+    let out = world.cmd().args(["projects"]).output().unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("projalpha"), "expected projalpha in output");
+    assert!(text.contains("projbeta"),  "expected projbeta in output");
+}
+
+#[test]
+fn test_projects_shows_session_count() {
+    let world = MockWorld::new();
+    let proj = world.project("threecount");
+    proj.session("sess-tc1").user_message("msg1").done();
+    proj.session("sess-tc2").user_message("msg2").done();
+    proj.session("sess-tc3").user_message("msg3").done();
+
+    let out = world.cmd().args(["projects"]).output().unwrap();
+
+    assert!(out.status.success());
+    let text = stdout(&out);
+    // The output line for this project should mention 3 sessions
+    assert!(text.contains("3 session"), "expected '3 session' in output, got: {}", text);
+}
+
+#[test]
+fn test_projects_json_output() {
+    let world = MockWorld::new();
+    let proj = world.project("jsonproj");
+    proj.session("sess-jp").user_message("test content").done();
+
+    let out = world.cmd().args(["projects", "--json"]).output().unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out))
+        .expect("--json must produce valid JSON");
+    let arr = parsed.as_array().expect("expected JSON array");
+    assert!(!arr.is_empty());
+
+    // Find the entry for our project
+    let entry = arr.iter().find(|v| {
+        v["path"].as_str().unwrap_or("").contains("jsonproj")
+    }).expect("expected jsonproj entry in JSON output");
+
+    assert!(entry["path"].is_string(),        "expected path field");
+    assert!(entry["encodedPath"].is_string(),  "expected encodedPath field");
+    assert!(entry["sessionCount"].is_number(), "expected sessionCount field");
+    assert_eq!(entry["sessionCount"].as_u64().unwrap(), 1, "expected sessionCount == 1");
+    assert!(entry["latestMtime"].is_number(),  "expected latestMtime field");
+}
+
+#[test]
+fn test_projects_empty_exits_nonzero() {
+    let world = MockWorld::new();
+    // No projects created in mock home
+
+    let out = world.cmd().args(["projects"]).output().unwrap();
+
+    assert!(!out.status.success(), "should exit nonzero when no projects exist");
+}
+
+#[test]
+fn test_projects_shows_timestamp() {
+    let world = MockWorld::new();
+    let proj = world.project("tscheck");
+    proj.session("sess-ts").user_message("timestamped").done();
+
+    let out = world.cmd().args(["projects"]).output().unwrap();
+
+    assert!(out.status.success());
+    let text = stdout(&out);
+    // Should contain a date-like pattern (YYYY-MM-DD)
+    let has_date = text.lines().any(|l| l.contains("tscheck") && l.contains('-'));
+    assert!(has_date, "expected timestamp in project listing, got: {}", text);
+}
+
+#[test]
+fn test_projects_encoded_path_in_json() {
+    let world = MockWorld::new();
+    let proj = world.project("enctest");
+    proj.session("sess-enc").user_message("enc").done();
+
+    let out = world.cmd().args(["projects", "--json"]).output().unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out)).unwrap();
+    let arr = parsed.as_array().unwrap();
+
+    let entry = arr.iter().find(|v| {
+        v["encodedPath"].as_str().unwrap_or("").contains("enctest")
+    }).expect("expected enctest entry");
+
+    // encodedPath should use '-' separators (the raw stored form)
+    let ep = entry["encodedPath"].as_str().unwrap();
+    assert!(ep.contains('-'), "encodedPath should contain '-' separators");
+    assert!(ep.contains("enctest"), "encodedPath should contain project name");
+}

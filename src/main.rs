@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::{discover_sessions, discover_all_sessions, resolve_session, get_worktree_paths};
+use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, get_worktree_paths};
 use crate::search::{search_sessions, SearchOptions};
 use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
 
@@ -132,6 +132,13 @@ enum Commands {
         #[arg(long, default_value = "200")]
         max_line_width: usize,
 
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List all known projects under ~/.claude/projects/
+    Projects {
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -379,6 +386,45 @@ fn main() {
                     count += 1;
                 }
                 eprintln!("{} session{}", count, if count == 1 { "" } else { "s" });
+            }
+        }
+
+        Commands::Projects { json } => {
+            let projects = discover_projects();
+
+            if projects.is_empty() {
+                eprintln!("No projects found under ~/.claude/projects/");
+                std::process::exit(1);
+            }
+
+            if json {
+                let output: Vec<_> = projects.iter().map(|p| {
+                    let mtime = p.latest_mtime
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    json!({
+                        "path": p.decoded_path,
+                        "encodedPath": p.encoded_path,
+                        "sessionCount": p.session_count,
+                        "latestMtime": mtime,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            } else {
+                for p in &projects {
+                    let ts_str = p.latest_mtime
+                        .map(|t| {
+                            let dt: chrono::DateTime<chrono::Utc> = t.into();
+                            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                        })
+                        .unwrap_or_else(|| "no sessions".to_string());
+                    println!("{} ({} session{}) {}",
+                        p.decoded_path,
+                        p.session_count,
+                        if p.session_count == 1 { "" } else { "s" },
+                        ts_str);
+                }
+                eprintln!("{} project{}", projects.len(), if projects.len() == 1 { "" } else { "s" });
             }
         }
 
