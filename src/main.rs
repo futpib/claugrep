@@ -28,6 +28,10 @@ struct Cli {
     #[arg(long, global = true)]
     account: Option<String>,
 
+    /// Only show sessions modified after the given date (git-compatible: yesterday, '2 days ago', '2026-03-24', Monday, 'last week')
+    #[arg(long = "after", alias = "since", global = true)]
+    after: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -190,6 +194,93 @@ fn parse_targets(s: &str) -> HashSet<Target> {
     }).collect()
 }
 
+fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    use chrono::{Datelike, Duration, NaiveDate, Utc, Weekday};
+
+    let today = Utc::now().date_naive();
+    let val = value.trim().to_lowercase();
+
+    let date_to_dt = |d: NaiveDate| -> chrono::DateTime<Utc> {
+        d.and_hms_opt(0, 0, 0).unwrap().and_utc()
+    };
+
+    // ISO date: 2026-03-24
+    if let Ok(date) = NaiveDate::parse_from_str(&val, "%Y-%m-%d") {
+        return Ok(date_to_dt(date));
+    }
+
+    // Special keywords
+    match val.as_str() {
+        "yesterday"  => return Ok(date_to_dt(today - Duration::days(1))),
+        "today"      => return Ok(date_to_dt(today)),
+        "last week"  => return Ok(date_to_dt(today - Duration::weeks(1))),
+        "last month" => return Ok(date_to_dt(today - Duration::days(30))),
+        "last year"  => return Ok(date_to_dt(today - Duration::days(365))),
+        _ => {}
+    }
+
+    // "N unit(s) ago"
+    if let Some(rest) = val.strip_suffix(" ago") {
+        let parts: Vec<&str> = rest.trim().splitn(2, ' ').collect();
+        if parts.len() == 2 {
+            if let Ok(n) = parts[0].parse::<i64>() {
+                let unit = parts[1].trim().trim_end_matches('s'); // strip plural
+                return match unit {
+                    "day"    => Ok(date_to_dt(today - Duration::days(n))),
+                    "week"   => Ok(date_to_dt(today - Duration::weeks(n))),
+                    "month"  => Ok(date_to_dt(today - Duration::days(n * 30))),
+                    "year"   => Ok(date_to_dt(today - Duration::days(n * 365))),
+                    "hour"   => Ok(Utc::now() - Duration::hours(n)),
+                    "minute" => Ok(Utc::now() - Duration::minutes(n)),
+                    _ => Err(format!("unknown time unit '{}' in '{}'", unit, value)),
+                };
+            }
+        }
+    }
+
+    // Named weekday: most recent occurrence (including today)
+    let weekday = match val.as_str() {
+        "monday"    => Some(Weekday::Mon),
+        "tuesday"   => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday"  => Some(Weekday::Thu),
+        "friday"    => Some(Weekday::Fri),
+        "saturday"  => Some(Weekday::Sat),
+        "sunday"    => Some(Weekday::Sun),
+        _ => None,
+    };
+    if let Some(wd) = weekday {
+        let mut date = today;
+        for _ in 0..7 {
+            if date.weekday() == wd {
+                return Ok(date_to_dt(date));
+            }
+            date = date - Duration::days(1);
+        }
+    }
+
+    Err(format!(
+        "cannot parse date '{}'; supported formats: 2026-03-24, yesterday, '2 days ago', 'last week', Monday",
+        value
+    ))
+}
+
+fn filter_sessions_since(
+    sessions: Vec<sessions::SessionFile>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<sessions::SessionFile> {
+    match since {
+        None => sessions,
+        Some(cutoff) => sessions
+            .into_iter()
+            .filter(|s| {
+                let mtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
+                mtime >= cutoff
+            })
+            .collect(),
+    }
+}
+
 fn resolve_project(path: &PathBuf) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.clone())
@@ -240,6 +331,17 @@ fn main() {
 
     let config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
 
+    let since: Option<chrono::DateTime<chrono::Utc>> = match cli.after.as_deref() {
+        None => None,
+        Some(v) => match parse_since_date(v) {
+            Ok(dt) => Some(dt),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        },
+    };
+
     match cli.command {
         Commands::Search {
             pattern, user, assistant, bash_command, bash_output,
@@ -283,7 +385,10 @@ fn main() {
                 sessions_with_matches,
             };
 
-            let all_sessions = discover_sessions_across_configs(&project_path, &config_dirs);
+            let all_sessions = filter_sessions_since(
+                discover_sessions_across_configs(&project_path, &config_dirs),
+                since,
+            );
 
             if all_sessions.is_empty() {
                 eprintln!("No session files found for project {}", project_path);
@@ -350,12 +455,15 @@ fn main() {
         Commands::Last { count, project, targets, max_line_width, json } => {
             let target_set = parse_targets(&targets);
 
-            let all_sessions: Vec<_> = if let Some(ref proj) = project {
-                let project_path = resolve_project(proj);
-                discover_sessions_across_configs(&project_path, &config_dirs)
-            } else {
-                discover_all_sessions(&config_dirs)
-            };
+            let all_sessions: Vec<_> = filter_sessions_since(
+                if let Some(ref proj) = project {
+                    let project_path = resolve_project(proj);
+                    discover_sessions_across_configs(&project_path, &config_dirs)
+                } else {
+                    discover_all_sessions(&config_dirs)
+                },
+                since,
+            );
 
             if all_sessions.is_empty() {
                 eprintln!("No session files found");
@@ -407,7 +515,10 @@ fn main() {
             // For Sessions command, use the first config dir
             let config_dir = config_dirs.first().map(|(_, d)| d.as_path())
                 .unwrap_or_else(|| Path::new(""));
-            let sessions = discover_sessions(&project_path, None, config_dir);
+            let sessions = filter_sessions_since(
+                discover_sessions(&project_path, None, config_dir),
+                since,
+            );
 
             if sessions.is_empty() {
                 eprintln!("No sessions found for project {}", project_path);
@@ -496,7 +607,10 @@ fn main() {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
-            let all_sessions = discover_sessions_across_configs(&project_path, &config_dirs);
+            let all_sessions = filter_sessions_since(
+                discover_sessions_across_configs(&project_path, &config_dirs),
+                since,
+            );
             let sessions = match resolve_session(Some(&session), &all_sessions) {
                 Ok(s) => s,
                 Err(e) => {

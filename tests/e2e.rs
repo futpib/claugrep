@@ -8,6 +8,9 @@ use std::fs;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, Duration};
+
+extern crate filetime;
 
 // ── Mock world ────────────────────────────────────────────────────────────────
 
@@ -1065,4 +1068,193 @@ fn test_account_flag_search() {
     let text_miss = strip_ansi(stdout(&out_miss));
     assert!(!text_miss.contains("ACCT_SEARCH_DEFAULT_ONLY"),
         "--account bar should not find default sessions");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// --after / --since date filter
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Set a file's mtime to the given SystemTime.
+fn set_mtime(path: &PathBuf, t: SystemTime) {
+    let ft = filetime::FileTime::from_system_time(t);
+    filetime::set_file_mtime(path, ft).expect("failed to set file mtime");
+}
+
+#[test]
+fn test_since_sessions_filters_old_session() {
+    let world = MockWorld::new();
+    let proj = world.project("since-sessions");
+
+    // Old session: 5 days ago
+    proj.session("aaaa-old").user_message("OLD_SESSION_CONTENT").done();
+    let old_path = proj.session_dir.join("aaaa-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    // Recent session: 1 hour ago (definitely after "yesterday")
+    proj.session("bbbb-new").user_message("NEW_SESSION_CONTENT").done();
+    // file mtime is already current (just created)
+
+    // --after yesterday: only new session should appear in sessions list
+    let out = world
+        .cmd()
+        .args(["--after", "yesterday", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("bbbb-new"), "recent session should appear");
+    assert!(!text.contains("aaaa-old"), "old session should be filtered out by --after yesterday");
+}
+
+#[test]
+fn test_since_alias_for_after() {
+    let world = MockWorld::new();
+    let proj = world.project("since-alias");
+
+    proj.session("cccc-old").user_message("ALIAS_OLD").done();
+    let old_path = proj.session_dir.join("cccc-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    proj.session("dddd-new").user_message("ALIAS_NEW").done();
+
+    // --since is an alias for --after
+    let out = world
+        .cmd()
+        .args(["--since", "yesterday", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("dddd-new"), "recent session should appear with --since");
+    assert!(!text.contains("cccc-old"), "old session should be filtered out by --since");
+}
+
+#[test]
+fn test_since_search_filters_sessions() {
+    let world = MockWorld::new();
+    let proj = world.project("since-search");
+
+    // Both sessions contain the same keyword, but only the new one should match after filtering
+    proj.session("eeee-old").user_message("SINCE_SEARCH_KEYWORD").done();
+    let old_path = proj.session_dir.join("eeee-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    proj.session("ffff-new").user_message("SINCE_SEARCH_KEYWORD").done();
+
+    let out = world
+        .cmd()
+        .args(["--after", "yesterday", "search", "SINCE_SEARCH_KEYWORD",
+               "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("ffff-new"), "recent session match should appear");
+    assert!(!text.contains("eeee-old"), "old session should be filtered out by --after");
+}
+
+#[test]
+fn test_since_iso_date_format() {
+    let world = MockWorld::new();
+    let proj = world.project("since-iso");
+
+    proj.session("gggg-old").user_message("ISO_OLD").done();
+    let old_path = proj.session_dir.join("gggg-old.jsonl");
+    // Set to 10 days ago
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10 * 24 * 3600));
+
+    proj.session("hhhh-new").user_message("ISO_NEW").done();
+
+    // Use a date 3 days ago in ISO format: compute it
+    let cutoff = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let secs = now - 3 * 24 * 3600;
+        // Format as YYYY-MM-DD
+        let dt = chrono::DateTime::<chrono::Utc>::from(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+        );
+        dt.format("%Y-%m-%d").to_string()
+    };
+
+    let out = world
+        .cmd()
+        .args(["--after", &cutoff, "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("hhhh-new"), "recent session should appear with ISO date");
+    assert!(!text.contains("gggg-old"), "old session (10 days ago) should be filtered out");
+}
+
+#[test]
+fn test_since_no_filter_shows_all() {
+    let world = MockWorld::new();
+    let proj = world.project("since-nofilter");
+
+    proj.session("iiii-old").user_message("NO_FILTER_OLD").done();
+    let old_path = proj.session_dir.join("iiii-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    proj.session("jjjj-new").user_message("NO_FILTER_NEW").done();
+
+    // Without --after, both sessions should appear
+    let out = world
+        .cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("iiii-old"), "old session should appear without date filter");
+    assert!(text.contains("jjjj-new"), "new session should appear without date filter");
+}
+
+#[test]
+fn test_since_relative_days_ago() {
+    let world = MockWorld::new();
+    let proj = world.project("since-reldays");
+
+    proj.session("kkkk-old").user_message("REL_DAYS_OLD").done();
+    let old_path = proj.session_dir.join("kkkk-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10 * 24 * 3600));
+
+    proj.session("llll-new").user_message("REL_DAYS_NEW").done();
+
+    let out = world
+        .cmd()
+        .args(["--after", "5 days ago", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    assert!(text.contains("llll-new"), "recent session should appear with '5 days ago'");
+    assert!(!text.contains("kkkk-old"), "10-day-old session should be filtered with '5 days ago'");
+}
+
+#[test]
+fn test_since_invalid_date_exits_nonzero() {
+    let world = MockWorld::new();
+    let proj = world.project("since-invalid");
+    proj.session("mmmm").user_message("INVALID_DATE_TEST").done();
+
+    let out = world
+        .cmd()
+        .args(["--after", "not-a-date-at-all-xyz", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "invalid --after value should exit nonzero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot parse date") || stderr.contains("error"),
+        "should print an error about the bad date");
 }
