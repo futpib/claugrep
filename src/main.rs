@@ -237,7 +237,13 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let sessions = resolve_session(session.as_deref(), &all_sessions);
+            let sessions = match resolve_session(session.as_deref(), &all_sessions) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            };
             let stdout = std::io::stdout();
 
             if sessions_with_matches {
@@ -435,7 +441,13 @@ fn main() {
                 .collect();
 
             let all_sessions = discover_sessions(&project_path, None);
-            let sessions = resolve_session(Some(&session), &all_sessions);
+            let sessions = match resolve_session(Some(&session), &all_sessions) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            };
 
             if sessions.is_empty() {
                 eprintln!("No sessions found matching '{}'", session);

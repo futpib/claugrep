@@ -118,6 +118,20 @@ pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
     }
 }
 
+/// Discover sessions for a project path, including all git worktrees, deduplicating by file path.
+pub fn discover_sessions_with_worktrees(project_path: &str) -> Vec<SessionFile> {
+    let worktree_paths = get_worktree_paths(project_path);
+    let mut unique_paths: Vec<String> = worktree_paths;
+    if !unique_paths.contains(&project_path.to_string()) {
+        unique_paths.push(project_path.to_string());
+    }
+    let mut seen_paths = std::collections::HashSet::new();
+    unique_paths.iter()
+        .flat_map(|p| discover_sessions(p, None))
+        .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
+        .collect()
+}
+
 /// Information about a single project directory.
 pub struct ProjectInfo {
     /// Raw directory name under ~/.claude/projects/ (e.g. `-home-user-code-proj`)
@@ -372,9 +386,9 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> 
 }
 
 /// Resolve a session selector: numeric offset, UUID prefix, or "all"
-pub fn resolve_session(selector: Option<&str>, sessions: &[SessionFile]) -> Vec<SessionFile> {
+pub fn resolve_session(selector: Option<&str>, sessions: &[SessionFile]) -> Result<Vec<SessionFile>, String> {
     let selector = match selector {
-        None | Some("all") => return sessions.to_vec(),
+        None | Some("all") => return Ok(sessions.to_vec()),
         Some(s) => s,
     };
 
@@ -400,24 +414,23 @@ pub fn resolve_session(selector: Option<&str>, sessions: &[SessionFile]) -> Vec<
         };
 
         if idx < 0 || idx >= total {
-            eprintln!("Session offset {selector} out of range ({total} sessions available)");
-            std::process::exit(1);
+            return Err(format!("Session offset {selector} out of range ({total} sessions available)"));
         }
 
         let target_id = &chronological[idx as usize].session_id;
-        return sessions
+        return Ok(sessions
             .iter()
             .filter(|s| &s.session_id == target_id)
             .cloned()
-            .collect();
+            .collect());
     }
 
     // UUID prefix match
-    sessions
+    Ok(sessions
         .iter()
         .filter(|s| s.session_id.starts_with(selector))
         .cloned()
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -444,9 +457,9 @@ mod tests {
     #[test]
     fn test_resolve_session_all() {
         let sessions = vec![mock_session("aaa"), mock_session("bbb")];
-        let result = resolve_session(None, &sessions);
+        let result = resolve_session(None, &sessions).unwrap();
         assert_eq!(result.len(), 2);
-        let result = resolve_session(Some("all"), &sessions);
+        let result = resolve_session(Some("all"), &sessions).unwrap();
         assert_eq!(result.len(), 2);
     }
 
@@ -456,7 +469,7 @@ mod tests {
             mock_session("aabbccdd-0000-0000-0000-000000000000"),
             mock_session("bbccddee-0000-0000-0000-000000000000"),
         ];
-        let result = resolve_session(Some("aabb"), &sessions);
+        let result = resolve_session(Some("aabb"), &sessions).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].session_id, "aabbccdd-0000-0000-0000-000000000000");
     }
@@ -468,10 +481,10 @@ mod tests {
             mock_session("new-session"),
         ];
         // offset 1 = oldest (chronological first)
-        let result = resolve_session(Some("1"), &sessions);
+        let result = resolve_session(Some("1"), &sessions).unwrap();
         assert_eq!(result.len(), 1);
         // offset 2 = newest
-        let result2 = resolve_session(Some("2"), &sessions);
+        let result2 = resolve_session(Some("2"), &sessions).unwrap();
         assert_eq!(result2.len(), 1);
         assert_ne!(result[0].session_id, result2[0].session_id);
     }
@@ -483,13 +496,20 @@ mod tests {
             mock_session("new-session"),
         ];
         // offset 0 = latest
-        let result0 = resolve_session(Some("0"), &sessions);
+        let result0 = resolve_session(Some("0"), &sessions).unwrap();
         assert_eq!(result0.len(), 1);
         // offset -1 = second latest = same as 0 when there are only 2
         // (offset -1 means "one before latest", so index total-2)
-        let result_neg1 = resolve_session(Some("-1"), &sessions);
+        let result_neg1 = resolve_session(Some("-1"), &sessions).unwrap();
         assert_eq!(result_neg1.len(), 1);
         assert_ne!(result0[0].session_id, result_neg1[0].session_id);
+    }
+
+    #[test]
+    fn test_resolve_session_offset_out_of_range() {
+        let sessions = vec![mock_session("only-session")];
+        let err = resolve_session(Some("99"), &sessions).unwrap_err();
+        assert!(err.contains("out of range"));
     }
 
     #[test]
