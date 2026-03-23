@@ -331,10 +331,8 @@ fn main() {
             // Collect all content across all sessions
             let mut all_records: Vec<parser::ExtractedContent> = vec![];
             for session in &all_sessions {
-                let tool_use_map = parser::build_tool_use_map(&session.file_path);
                 let contents = parser::extract_content(
                     &session.file_path,
-                    &tool_use_map,
                     &target_set,
                     &session.session_id,
                     session.is_subagent,
@@ -463,10 +461,8 @@ fn main() {
             }
 
             for s in &sessions {
-                let tool_use_map = parser::build_tool_use_map(&s.file_path);
                 let contents = parser::extract_content(
                     &s.file_path,
-                    &tool_use_map,
                     &target_set,
                     &s.session_id,
                     s.is_subagent,

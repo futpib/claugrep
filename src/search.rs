@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use regex::Regex;
 
-use crate::parser::{build_tool_use_map, extract_content, Target};
+use crate::parser::{extract_content, Target};
 use crate::sessions::SessionFile;
 
 pub struct MatchedLine {
@@ -89,10 +89,8 @@ where
             break;
         }
 
-        let tool_use_map = build_tool_use_map(&session.file_path);
         let contents = extract_content(
             &session.file_path,
-            &tool_use_map,
             &options.targets,
             &session.session_id,
             session.is_subagent,

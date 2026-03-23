@@ -40,24 +40,6 @@ pub struct ExtractedContent {
 
 type ToolUseMap = HashMap<String, String>;
 
-pub fn build_tool_use_map(path: &Path) -> ToolUseMap {
-    let mut map = ToolUseMap::new();
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return map,
-    };
-
-    for line in BufReader::new(file).lines().flatten() {
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-            collect_tool_use_ids(&entry, &mut map);
-        }
-    }
-    map
-}
-
 fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
     let content = match entry["type"].as_str() {
         Some("assistant") => &entry["message"]["content"],
@@ -78,7 +60,6 @@ fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
 
 pub fn extract_content(
     path: &Path,
-    tool_use_map: &ToolUseMap,
     targets: &std::collections::HashSet<String>,
     session_id: &str,
     is_subagent: bool,
@@ -88,13 +69,15 @@ pub fn extract_content(
         Err(_) => return vec![],
     };
 
+    let mut tool_use_map = ToolUseMap::new();
     let mut results = vec![];
     for line in BufReader::new(file).lines().flatten() {
         if line.is_empty() {
             continue;
         }
         if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-            extract_from_entry(&entry, tool_use_map, targets, session_id, is_subagent, &mut results);
+            collect_tool_use_ids(&entry, &mut tool_use_map);
+            extract_from_entry(&entry, &tool_use_map, targets, session_id, is_subagent, &mut results);
         }
     }
     results
@@ -325,8 +308,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"user","message":{"role":"user","content":"hello world"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"test-session"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "test-session", false);
+        let contents = extract_content(f.path(), &all_targets(), "test-session", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].text, "hello world");
         assert_eq!(contents[0].target, Target::User);
@@ -337,8 +319,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi there"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].text, "hi there");
         assert_eq!(contents[0].target, Target::Assistant);
@@ -349,8 +330,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls -la"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
         let bash = contents.iter().find(|c| c.target == Target::BashCommand);
         assert!(bash.is_some());
         assert_eq!(bash.unwrap().text, "ls -la");
@@ -363,8 +343,7 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"ls"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"file1.txt\nfile2.txt"}]},"timestamp":"2024-01-01T00:00:01Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
         let output = contents.iter().find(|c| c.target == Target::BashOutput);
         assert!(output.is_some());
         assert!(output.unwrap().text.contains("file1.txt"));
@@ -375,8 +354,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":"Summary of prior conversation"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::CompactSummary);
     }
@@ -386,8 +364,7 @@ mod tests {
         let f = write_jsonl(&[
             r#"{"type":"user","message":{"role":"user","content":"Do the thing"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", true); // is_subagent=true
+        let contents = extract_content(f.path(), &all_targets(), "s", true); // is_subagent=true
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::SubagentPrompt);
     }
@@ -398,8 +375,7 @@ mod tests {
             "this is not json at all!!",
             r#"{"type":"user","message":{"content":"valid"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
-        let contents = extract_content(f.path(), &map, &all_targets(), "s", false);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
         // Should parse the valid line and skip the malformed one
         assert_eq!(contents.len(), 1);
     }
@@ -410,10 +386,9 @@ mod tests {
             r#"{"type":"user","message":{"content":"user message"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
-        let map = build_tool_use_map(f.path());
         // Only user target
         let user_only: HashSet<String> = ["user"].iter().map(|s| s.to_string()).collect();
-        let contents = extract_content(f.path(), &map, &user_only, "s", false);
+        let contents = extract_content(f.path(), &user_only, "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::User);
     }
