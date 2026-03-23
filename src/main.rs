@@ -15,6 +15,7 @@ use serde_json::json;
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, get_worktree_paths};
 use crate::search::{search_sessions, SearchOptions};
 use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
+use crate::parser::Target;
 
 #[derive(Parser)]
 #[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
@@ -160,11 +161,25 @@ enum Commands {
     },
 }
 
-fn all_targets() -> HashSet<String> {
+fn all_targets() -> HashSet<Target> {
     [
-        "user", "assistant", "bash-command", "bash-output",
-        "tool-use", "tool-result", "subagent-prompt", "compact-summary",
-    ].iter().map(|s| s.to_string()).collect()
+        Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
+        Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
+    ].into_iter().collect()
+}
+
+fn parse_targets(s: &str) -> HashSet<Target> {
+    s.split(',').filter_map(|t| match t.trim() {
+        "user" => Some(Target::User),
+        "assistant" => Some(Target::Assistant),
+        "bash-command" => Some(Target::BashCommand),
+        "bash-output" => Some(Target::BashOutput),
+        "tool-use" => Some(Target::ToolUse),
+        "tool-result" => Some(Target::ToolResult),
+        "subagent-prompt" => Some(Target::SubagentPrompt),
+        "compact-summary" => Some(Target::CompactSummary),
+        other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
+    }).collect()
 }
 
 fn resolve_project(path: &PathBuf) -> String {
@@ -194,15 +209,15 @@ fn main() {
         } => {
             let project_path = resolve_project(&project);
 
-            let mut targets: HashSet<String> = HashSet::new();
-            if user { targets.insert("user".into()); }
-            if assistant { targets.insert("assistant".into()); }
-            if bash_command { targets.insert("bash-command".into()); }
-            if bash_output { targets.insert("bash-output".into()); }
-            if tool_use { targets.insert("tool-use".into()); }
-            if tool_result { targets.insert("tool-result".into()); }
-            if subagent_prompt { targets.insert("subagent-prompt".into()); }
-            if compact_summary { targets.insert("compact-summary".into()); }
+            let mut targets: HashSet<Target> = HashSet::new();
+            if user { targets.insert(Target::User); }
+            if assistant { targets.insert(Target::Assistant); }
+            if bash_command { targets.insert(Target::BashCommand); }
+            if bash_output { targets.insert(Target::BashOutput); }
+            if tool_use { targets.insert(Target::ToolUse); }
+            if tool_result { targets.insert(Target::ToolResult); }
+            if subagent_prompt { targets.insert(Target::SubagentPrompt); }
+            if compact_summary { targets.insert(Target::CompactSummary); }
             if targets.is_empty() { targets = all_targets(); }
 
             let flags = if ignore_case { "(?i)" } else { "" };
@@ -303,9 +318,7 @@ fn main() {
         }
 
         Commands::Last { count, project, targets, max_line_width, json } => {
-            let target_set: HashSet<String> = targets.split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
+            let target_set = parse_targets(&targets);
 
             let all_sessions: Vec<_> = if let Some(ref proj) = project {
                 let project_path = resolve_project(proj);
@@ -445,9 +458,7 @@ fn main() {
 
         Commands::Dump { session, project, targets } => {
             let project_path = resolve_project(&project);
-            let target_set: HashSet<String> = targets.split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
+            let target_set = parse_targets(&targets);
 
             let all_sessions = discover_sessions(&project_path, None);
             let sessions = match resolve_session(Some(&session), &all_sessions) {

@@ -23,7 +23,7 @@ pub struct SearchMatch {
 
 pub struct SearchOptions {
     pub patterns: Vec<Regex>,
-    pub targets: HashSet<String>,
+    pub targets: HashSet<Target>,
     pub context_before: usize,
     pub context_after: usize,
     pub max_results: usize,

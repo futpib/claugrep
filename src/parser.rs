@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
     User,
     Assistant,
@@ -60,7 +60,7 @@ fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
 
 pub fn extract_content(
     path: &Path,
-    targets: &std::collections::HashSet<String>,
+    targets: &std::collections::HashSet<Target>,
     session_id: &str,
     is_subagent: bool,
 ) -> Vec<ExtractedContent> {
@@ -96,7 +96,7 @@ pub fn extract_content(
 fn extract_from_entry(
     entry: &serde_json::Value,
     tool_use_map: &ToolUseMap,
-    targets: &std::collections::HashSet<String>,
+    targets: &std::collections::HashSet<Target>,
     session_id: &str,
     is_subagent: bool,
     out: &mut Vec<ExtractedContent>,
@@ -128,7 +128,7 @@ fn extract_from_entry(
 fn extract_user(
     entry: &serde_json::Value,
     tool_use_map: &ToolUseMap,
-    targets: &std::collections::HashSet<String>,
+    targets: &std::collections::HashSet<Target>,
     session_id: &str,
     timestamp: &str,
     is_subagent: bool,
@@ -138,11 +138,11 @@ fn extract_user(
 
     // Determine user target type
     let user_target = if entry["isCompactSummary"] == true {
-        if targets.contains("compact-summary") { Some(Target::CompactSummary) } else { None }
+        if targets.contains(&Target::CompactSummary) { Some(Target::CompactSummary) } else { None }
     } else if is_subagent {
-        if targets.contains("subagent-prompt") { Some(Target::SubagentPrompt) } else { None }
+        if targets.contains(&Target::SubagentPrompt) { Some(Target::SubagentPrompt) } else { None }
     } else {
-        if targets.contains("user") { Some(Target::User) } else { None }
+        if targets.contains(&Target::User) { Some(Target::User) } else { None }
     };
 
     if let Some(target) = user_target {
@@ -183,15 +183,15 @@ fn extract_user(
             };
             let tool_name = tool_use_map.get(tool_use_id).cloned().unwrap_or_default();
             let is_bash = tool_name == "Bash";
-            let target_str = if is_bash { "bash-output" } else { "tool-result" };
+            let target = if is_bash { Target::BashOutput } else { Target::ToolResult };
 
-            if !targets.contains(target_str) {
+            if !targets.contains(&target) {
                 continue;
             }
 
             if let Some(text) = extract_tool_result_text(block) {
                 out.push(ExtractedContent {
-                    target: if is_bash { Target::BashOutput } else { Target::ToolResult },
+                    target,
                     text,
                     tool_name: Some(tool_name),
                     timestamp: timestamp.to_string(),
@@ -241,7 +241,7 @@ fn format_tool_input(input: &serde_json::Value) -> String {
 
 fn extract_assistant(
     entry: &serde_json::Value,
-    targets: &std::collections::HashSet<String>,
+    targets: &std::collections::HashSet<Target>,
     session_id: &str,
     timestamp: &str,
     out: &mut Vec<ExtractedContent>,
@@ -252,7 +252,7 @@ fn extract_assistant(
     };
 
     for block in content {
-        if block["type"] == "text" && targets.contains("assistant") {
+        if block["type"] == "text" && targets.contains(&Target::Assistant) {
             if let Some(text) = block["text"].as_str() {
                 out.push(ExtractedContent {
                     target: Target::Assistant,
@@ -268,7 +268,7 @@ fn extract_assistant(
             let name = block["name"].as_str().unwrap_or("").to_string();
             let input = &block["input"];
 
-            if name == "Bash" && targets.contains("bash-command") {
+            if name == "Bash" && targets.contains(&Target::BashCommand) {
                 if let Some(cmd) = input["command"].as_str() {
                     out.push(ExtractedContent {
                         target: Target::BashCommand,
@@ -280,7 +280,7 @@ fn extract_assistant(
                 }
             }
 
-            if targets.contains("tool-use") && !name.is_empty() {
+            if targets.contains(&Target::ToolUse) && !name.is_empty() {
                 out.push(ExtractedContent {
                     target: Target::ToolUse,
                     text: format_tool_input(input),
@@ -308,9 +308,11 @@ mod tests {
         f
     }
 
-    fn all_targets() -> HashSet<String> {
-        ["user", "assistant", "bash-command", "bash-output", "tool-use", "tool-result", "subagent-prompt", "compact-summary"]
-            .iter().map(|s| s.to_string()).collect()
+    fn all_targets() -> HashSet<Target> {
+        [
+            Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
+            Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
+        ].into_iter().collect()
     }
 
     #[test]
@@ -397,7 +399,7 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"text","text":"assistant reply"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
         ]);
         // Only user target
-        let user_only: HashSet<String> = ["user"].iter().map(|s| s.to_string()).collect();
+        let user_only: HashSet<Target> = [Target::User].into_iter().collect();
         let contents = extract_content(f.path(), &user_only, "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::User);
