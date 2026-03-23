@@ -66,18 +66,28 @@ pub fn extract_content(
 ) -> Vec<ExtractedContent> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("warning: failed to open {}: {}", path.display(), e);
+            return vec![];
+        }
     };
 
     let mut tool_use_map = ToolUseMap::new();
     let mut results = vec![];
-    for line in BufReader::new(file).lines().flatten() {
+    for (line_num, line_result) in BufReader::new(file).lines().enumerate() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
         if line.is_empty() {
             continue;
         }
-        if let Ok(entry) = serde_json::from_str::<serde_json::Value>(&line) {
-            collect_tool_use_ids(&entry, &mut tool_use_map);
-            extract_from_entry(&entry, &tool_use_map, targets, session_id, is_subagent, &mut results);
+        match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(entry) => {
+                collect_tool_use_ids(&entry, &mut tool_use_map);
+                extract_from_entry(&entry, &tool_use_map, targets, session_id, is_subagent, &mut results);
+            }
+            Err(e) => eprintln!("warning: {}: line {}: {}", path.display(), line_num + 1, e),
         }
     }
     results

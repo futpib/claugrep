@@ -74,7 +74,10 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
     let subagent_dir = project_dir.join(session_id).join("subagents");
     let entries = match fs::read_dir(&subagent_dir) {
         Ok(e) => e,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("warning: failed to read directory {}: {}", subagent_dir.display(), e);
+            return vec![];
+        }
     };
 
     entries
@@ -86,7 +89,20 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
         })
         .filter_map(|e| {
             let file_path = e.path();
-            let mtime = fs::metadata(&file_path).ok()?.modified().ok()?;
+            let meta = match fs::metadata(&file_path) {
+                Ok(m) => m,
+                Err(err) => {
+                    eprintln!("warning: failed to read metadata for {}: {}", file_path.display(), err);
+                    return None;
+                }
+            };
+            let mtime = match meta.modified() {
+                Ok(t) => t,
+                Err(err) => {
+                    eprintln!("warning: failed to get modification time for {}: {}", file_path.display(), err);
+                    return None;
+                }
+            };
             Some(SessionFile {
                 session_id: session_id.to_string(),
                 file_path,
@@ -151,7 +167,10 @@ pub fn discover_projects() -> Vec<ProjectInfo> {
 
     let entries = match fs::read_dir(&projects_root) {
         Ok(e) => e,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
+            return vec![];
+        }
     };
 
     let mut projects: Vec<ProjectInfo> = entries
@@ -208,7 +227,10 @@ pub fn discover_all_sessions() -> Vec<SessionFile> {
 
     let entries = match fs::read_dir(&projects_root) {
         Ok(e) => e,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
+            return vec![];
+        }
     };
 
     let mut seen_paths = std::collections::HashSet::new();
@@ -222,14 +244,30 @@ pub fn discover_all_sessions() -> Vec<SessionFile> {
             let dir = projects_root.join(&encoded);
             let inner = match fs::read_dir(&dir) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
+                    continue;
+                }
             };
             let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = inner
                 .flatten()
                 .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
                 .filter_map(|e| {
                     let path = e.path();
-                    let mtime = fs::metadata(&path).ok()?.modified().ok()?;
+                    let meta = match fs::metadata(&path) {
+                        Ok(m) => m,
+                        Err(err) => {
+                            eprintln!("warning: failed to read metadata for {}: {}", path.display(), err);
+                            return None;
+                        }
+                    };
+                    let mtime = match meta.modified() {
+                        Ok(t) => t,
+                        Err(err) => {
+                            eprintln!("warning: failed to get modification time for {}: {}", path.display(), err);
+                            return None;
+                        }
+                    };
                     let sid = e.file_name().to_string_lossy().replace(".jsonl", "").to_string();
                     Some((sid, path, mtime))
                 })
@@ -264,7 +302,10 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> 
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
-        Err(_) => return vec![],
+        Err(e) => {
+            eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
+            return vec![];
+        }
     };
 
     let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = entries
@@ -272,7 +313,20 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> 
         .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
         .filter_map(|e| {
             let path = e.path();
-            let mtime = fs::metadata(&path).ok()?.modified().ok()?;
+            let meta = match fs::metadata(&path) {
+                Ok(m) => m,
+                Err(err) => {
+                    eprintln!("warning: failed to read metadata for {}: {}", path.display(), err);
+                    return None;
+                }
+            };
+            let mtime = match meta.modified() {
+                Ok(t) => t,
+                Err(err) => {
+                    eprintln!("warning: failed to get modification time for {}: {}", path.display(), err);
+                    return None;
+                }
+            };
             let sid = e.file_name().to_string_lossy().replace(".jsonl", "").to_string();
             Some((sid, path, mtime))
         })
