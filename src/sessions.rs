@@ -15,10 +15,36 @@ fn encode_project_path(path: &str) -> String {
     path.replace(['/', '.'], "-")
 }
 
-pub fn project_dir(project_path: &str) -> PathBuf {
-    let home = dirs::home_dir().expect("no home dir");
+/// Return the default Claude config dir. Checks CLAUDE_CONFIG_DIR env var first, then ~/.claude.
+pub fn default_claude_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::home_dir().expect("no home dir").join(".claude")
+}
+
+fn claudex_accounts_root() -> PathBuf {
+    dirs::config_dir().expect("no config dir").join("claudex").join("accounts")
+}
+
+pub fn claudex_account_config_dir(account: &str) -> PathBuf {
+    claudex_accounts_root().join(account).join("claude")
+}
+
+pub fn list_claudex_accounts() -> Vec<String> {
+    let root = claudex_accounts_root();
+    match fs::read_dir(&root) {
+        Err(_) => vec![],
+        Ok(entries) => entries.flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+    }
+}
+
+pub fn project_dir(project_path: &str, config_dir: &Path) -> PathBuf {
     let encoded = encode_project_path(project_path);
-    home.join(".claude").join("projects").join(encoded)
+    config_dir.join("projects").join(encoded)
 }
 
 fn read_line2(path: &Path) -> Option<String> {
@@ -135,7 +161,7 @@ pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
 }
 
 /// Discover sessions for a project path, including all git worktrees, deduplicating by file path.
-pub fn discover_sessions_with_worktrees(project_path: &str) -> Vec<SessionFile> {
+pub fn discover_sessions_with_worktrees(project_path: &str, config_dir: &Path) -> Vec<SessionFile> {
     let worktree_paths = get_worktree_paths(project_path);
     let mut unique_paths: Vec<String> = worktree_paths;
     if !unique_paths.contains(&project_path.to_string()) {
@@ -143,7 +169,7 @@ pub fn discover_sessions_with_worktrees(project_path: &str) -> Vec<SessionFile> 
     }
     let mut seen_paths = std::collections::HashSet::new();
     unique_paths.iter()
-        .flat_map(|p| discover_sessions(p, None))
+        .flat_map(|p| discover_sessions(p, None, config_dir))
         .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
         .collect()
 }
@@ -155,6 +181,7 @@ pub struct ProjectInfo {
     pub verified: bool,
     pub session_count: usize,
     pub latest_mtime: Option<std::time::SystemTime>,
+    pub account: Option<String>,
 }
 
 fn try_verify_decoded_path(encoded: &str) -> (String, bool) {
@@ -199,134 +226,139 @@ fn walk_and_verify(dir: &Path, tokens: &[&str]) -> Option<String> {
     None
 }
 
-/// List all project directories under ~/.claude/projects/.
-pub fn discover_projects() -> Vec<ProjectInfo> {
-    let home = dirs::home_dir().expect("no home dir");
-    let projects_root = home.join(".claude").join("projects");
+/// List all project directories under the given config dirs.
+pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<ProjectInfo> {
+    let mut all_projects: Vec<ProjectInfo> = vec![];
 
-    let entries = match fs::read_dir(&projects_root) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
-            return vec![];
-        }
-    };
+    for (account, config_dir) in config_dirs {
+        let projects_root = config_dir.join("projects");
 
-    let mut projects: Vec<ProjectInfo> = entries
-        .flatten()
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .filter_map(|e| {
-            let encoded = e.file_name().to_string_lossy().to_string();
-            let dir = projects_root.join(&encoded);
+        let entries = match fs::read_dir(&projects_root) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
+                continue;
+            }
+        };
 
-            let mut session_count = 0usize;
-            let mut latest_mtime: Option<std::time::SystemTime> = None;
+        let mut projects: Vec<ProjectInfo> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| {
+                let encoded = e.file_name().to_string_lossy().to_string();
+                let dir = projects_root.join(&encoded);
 
-            if let Ok(inner) = fs::read_dir(&dir) {
-                for entry in inner.flatten() {
-                    if entry.file_name().to_string_lossy().ends_with(".jsonl") {
-                        session_count += 1;
-                        if let Ok(meta) = fs::metadata(entry.path()) {
-                            if let Ok(mtime) = meta.modified() {
-                                latest_mtime = Some(match latest_mtime {
-                                    None => mtime,
-                                    Some(prev) => prev.max(mtime),
-                                });
+                let mut session_count = 0usize;
+                let mut latest_mtime: Option<std::time::SystemTime> = None;
+
+                if let Ok(inner) = fs::read_dir(&dir) {
+                    for entry in inner.flatten() {
+                        if entry.file_name().to_string_lossy().ends_with(".jsonl") {
+                            session_count += 1;
+                            if let Ok(meta) = fs::metadata(entry.path()) {
+                                if let Ok(mtime) = meta.modified() {
+                                    latest_mtime = Some(match latest_mtime {
+                                        None => mtime,
+                                        Some(prev) => prev.max(mtime),
+                                    });
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let (decoded, verified) = try_verify_decoded_path(&encoded);
+                let (decoded, verified) = try_verify_decoded_path(&encoded);
 
-            Some(ProjectInfo {
-                encoded_path: encoded,
-                decoded_path: decoded,
-                verified,
-                session_count,
-                latest_mtime,
+                Some(ProjectInfo {
+                    encoded_path: encoded,
+                    decoded_path: decoded,
+                    verified,
+                    session_count,
+                    latest_mtime,
+                    account: account.clone(),
+                })
             })
-        })
-        .collect();
+            .collect();
+
+        all_projects.append(&mut projects);
+    }
 
     // Most-recently-active projects first
-    projects.sort_by(|a, b| {
+    all_projects.sort_by(|a, b| {
         let ta = a.latest_mtime.unwrap_or(std::time::UNIX_EPOCH);
         let tb = b.latest_mtime.unwrap_or(std::time::UNIX_EPOCH);
         tb.cmp(&ta)
     });
 
-    projects
+    all_projects
 }
 
-/// Discover sessions across ALL project directories under ~/.claude/projects/
-pub fn discover_all_sessions() -> Vec<SessionFile> {
-    let home = dirs::home_dir().expect("no home dir");
-    let projects_root = home.join(".claude").join("projects");
-
-    let entries = match fs::read_dir(&projects_root) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
-            return vec![];
-        }
-    };
-
+/// Discover sessions across ALL project directories under the given config dirs.
+pub fn discover_all_sessions(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<SessionFile> {
     let mut seen_paths = std::collections::HashSet::new();
     let mut all = vec![];
 
-    for entry in entries.flatten() {
-        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            let encoded = entry.file_name().to_string_lossy().to_string();
-            // Decode encoded project path (reverse of encode_project_path)
-            // We don't need to decode — just discover all .jsonl in this dir
-            let dir = projects_root.join(&encoded);
-            let inner = match fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
-                    continue;
-                }
-            };
-            let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = inner
-                .flatten()
-                .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
-                .filter_map(|e| {
-                    let path = e.path();
-                    let meta = match fs::metadata(&path) {
-                        Ok(m) => m,
-                        Err(err) => {
-                            eprintln!("warning: failed to read metadata for {}: {}", path.display(), err);
-                            return None;
-                        }
-                    };
-                    let mtime = match meta.modified() {
-                        Ok(t) => t,
-                        Err(err) => {
-                            eprintln!("warning: failed to get modification time for {}: {}", path.display(), err);
-                            return None;
-                        }
-                    };
-                    let sid = e.file_name().to_string_lossy().replace(".jsonl", "").to_string();
-                    Some((sid, path, mtime))
-                })
-                .collect();
+    for (_account, config_dir) in config_dirs {
+        let projects_root = config_dir.join("projects");
 
-            for (sid, path, mtime) in &jsonl_files {
-                let path_str = path.to_string_lossy().to_string();
-                if seen_paths.insert(path_str) {
-                    all.push(SessionFile {
-                        session_id: sid.clone(),
-                        file_path: path.clone(),
-                        mtime: *mtime,
-                        is_subagent: false,
-                    });
-                    // Include subagents
-                    for sf in find_subagent_files(&dir, sid) {
-                        let sub_str = sf.file_path.to_string_lossy().to_string();
-                        if seen_paths.insert(sub_str) {
-                            all.push(sf);
+        let entries = match fs::read_dir(&projects_root) {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
+                continue;
+            }
+        };
+
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let encoded = entry.file_name().to_string_lossy().to_string();
+                let dir = projects_root.join(&encoded);
+                let inner = match fs::read_dir(&dir) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
+                        continue;
+                    }
+                };
+                let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = inner
+                    .flatten()
+                    .filter(|e| e.file_name().to_string_lossy().ends_with(".jsonl"))
+                    .filter_map(|e| {
+                        let path = e.path();
+                        let meta = match fs::metadata(&path) {
+                            Ok(m) => m,
+                            Err(err) => {
+                                eprintln!("warning: failed to read metadata for {}: {}", path.display(), err);
+                                return None;
+                            }
+                        };
+                        let mtime = match meta.modified() {
+                            Ok(t) => t,
+                            Err(err) => {
+                                eprintln!("warning: failed to get modification time for {}: {}", path.display(), err);
+                                return None;
+                            }
+                        };
+                        let sid = e.file_name().to_string_lossy().replace(".jsonl", "").to_string();
+                        Some((sid, path, mtime))
+                    })
+                    .collect();
+
+                for (sid, path, mtime) in &jsonl_files {
+                    let path_str = path.to_string_lossy().to_string();
+                    if seen_paths.insert(path_str) {
+                        all.push(SessionFile {
+                            session_id: sid.clone(),
+                            file_path: path.clone(),
+                            mtime: *mtime,
+                            is_subagent: false,
+                        });
+                        // Include subagents
+                        for sf in find_subagent_files(&dir, sid) {
+                            let sub_str = sf.file_path.to_string_lossy().to_string();
+                            if seen_paths.insert(sub_str) {
+                                all.push(sf);
+                            }
                         }
                     }
                 }
@@ -337,8 +369,8 @@ pub fn discover_all_sessions() -> Vec<SessionFile> {
     all
 }
 
-pub fn discover_sessions(project_path: &str, specific_session: Option<&str>) -> Vec<SessionFile> {
-    let dir = project_dir(project_path);
+pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, config_dir: &Path) -> Vec<SessionFile> {
+    let dir = project_dir(project_path, config_dir);
 
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,

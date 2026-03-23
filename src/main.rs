@@ -4,7 +4,7 @@ mod search;
 mod output;
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use std::io::Write;
 
@@ -20,6 +20,14 @@ use crate::parser::Target;
 #[derive(Parser)]
 #[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
 struct Cli {
+    /// Claude config directory (default: ~/.claude, overrides CLAUDE_CONFIG_DIR env var)
+    #[arg(long, global = true)]
+    config_dir: Option<PathBuf>,
+
+    /// Filter to a specific claudex account
+    #[arg(long, global = true)]
+    account: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -189,6 +197,36 @@ fn resolve_project(path: &PathBuf) -> String {
         .to_string()
 }
 
+/// Compute the list of (account_name, config_dir) pairs to use for session discovery.
+fn effective_config_dirs(config_dir: Option<&PathBuf>, account: Option<&str>) -> Vec<(Option<String>, PathBuf)> {
+    if let Some(dir) = config_dir {
+        return vec![(None, dir.clone())];
+    }
+    if let Some(acct) = account {
+        return vec![(Some(acct.to_string()), sessions::claudex_account_config_dir(acct))];
+    }
+    let mut dirs = vec![(None, sessions::default_claude_config_dir())];
+    for acct in sessions::list_claudex_accounts() {
+        dirs.push((Some(acct.clone()), sessions::claudex_account_config_dir(&acct)));
+    }
+    dirs
+}
+
+/// Discover sessions across all config dirs for a given project path, deduplicating by file path.
+fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<String>, PathBuf)]) -> Vec<sessions::SessionFile> {
+    let mut seen_paths = std::collections::HashSet::new();
+    let mut all = vec![];
+    for (_, config_dir) in config_dirs {
+        let sessions = discover_sessions_with_worktrees(project_path, config_dir);
+        for s in sessions {
+            if seen_paths.insert(s.file_path.to_string_lossy().to_string()) {
+                all.push(s);
+            }
+        }
+    }
+    all
+}
+
 fn main() {
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         // Print full help to stderr so the user sees all available subcommands
@@ -199,6 +237,8 @@ fn main() {
         e.print().expect("failed to write error");
         std::process::exit(e.exit_code());
     });
+
+    let config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
 
     match cli.command {
         Commands::Search {
@@ -243,7 +283,7 @@ fn main() {
                 sessions_with_matches,
             };
 
-            let all_sessions = discover_sessions_with_worktrees(&project_path);
+            let all_sessions = discover_sessions_across_configs(&project_path, &config_dirs);
 
             if all_sessions.is_empty() {
                 eprintln!("No session files found for project {}", project_path);
@@ -312,9 +352,9 @@ fn main() {
 
             let all_sessions: Vec<_> = if let Some(ref proj) = project {
                 let project_path = resolve_project(proj);
-                discover_sessions_with_worktrees(&project_path)
+                discover_sessions_across_configs(&project_path, &config_dirs)
             } else {
-                discover_all_sessions()
+                discover_all_sessions(&config_dirs)
             };
 
             if all_sessions.is_empty() {
@@ -364,7 +404,10 @@ fn main() {
 
         Commands::Sessions { project, json } => {
             let project_path = resolve_project(&project);
-            let sessions = discover_sessions(&project_path, None);
+            // For Sessions command, use the first config dir
+            let config_dir = config_dirs.first().map(|(_, d)| d.as_path())
+                .unwrap_or_else(|| Path::new(""));
+            let sessions = discover_sessions(&project_path, None, config_dir);
 
             if sessions.is_empty() {
                 eprintln!("No sessions found for project {}", project_path);
@@ -396,12 +439,14 @@ fn main() {
         }
 
         Commands::Projects { json } => {
-            let projects = discover_projects();
+            let projects = discover_projects(&config_dirs);
 
             if projects.is_empty() {
                 eprintln!("No projects found under ~/.claude/projects/");
                 std::process::exit(1);
             }
+
+            let has_multiple_accounts = config_dirs.iter().any(|(acct, _)| acct.is_some());
 
             if json {
                 let output: Vec<_> = projects.iter().map(|p| {
@@ -414,6 +459,7 @@ fn main() {
                         "verified": p.verified,
                         "sessionCount": p.session_count,
                         "latestMtime": mtime,
+                        "account": p.account,
                     })
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -426,12 +472,21 @@ fn main() {
                         })
                         .unwrap_or_else(|| "no sessions".to_string());
                     let unverified = if p.verified { "" } else { " [unverified]" };
-                    println!("{} ({} session{}) {}{}",
+                    let account_str = if has_multiple_accounts {
+                        match &p.account {
+                            Some(a) => format!(" [{}]", a),
+                            None => " [default]".to_string(),
+                        }
+                    } else {
+                        String::new()
+                    };
+                    println!("{} ({} session{}) {}{}{}",
                         p.decoded_path,
                         p.session_count,
                         if p.session_count == 1 { "" } else { "s" },
                         ts_str,
-                        unverified);
+                        unverified,
+                        account_str);
                 }
                 eprintln!("{} project{}", projects.len(), if projects.len() == 1 { "" } else { "s" });
             }
@@ -441,7 +496,7 @@ fn main() {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
-            let all_sessions = discover_sessions(&project_path, None);
+            let all_sessions = discover_sessions_across_configs(&project_path, &config_dirs);
             let sessions = match resolve_session(Some(&session), &all_sessions) {
                 Ok(s) => s,
                 Err(e) => {

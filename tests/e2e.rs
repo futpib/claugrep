@@ -28,6 +28,10 @@ impl MockWorld {
     fn cmd(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_claugrep"));
         cmd.env("HOME", self.home.path());
+        // Also set XDG_CONFIG_HOME so dirs::config_dir() uses our mock home's .config
+        cmd.env("XDG_CONFIG_HOME", self.home.path().join(".config"));
+        // Clear CLAUDE_CONFIG_DIR so it doesn't bleed between tests
+        cmd.env_remove("CLAUDE_CONFIG_DIR");
         cmd
     }
 
@@ -50,6 +54,19 @@ impl MockWorld {
             project_path,
             session_dir,
         }
+    }
+
+    /// Create a named mock project under a claudex account.
+    ///
+    /// Sessions are stored at `$HOME/.config/claudex/accounts/<account>/claude/projects/<encoded>/`.
+    fn account_project(&self, account: &str, name: &str) -> MockProject {
+        let project_path = format!("/claugrep-mock/{}", name);
+        let encoded = project_path.replace(['/', '.'], "-");
+        let account_dir = self.home.path()
+            .join(".config").join("claudex").join("accounts").join(account).join("claude");
+        let session_dir = account_dir.join("projects").join(&encoded);
+        fs::create_dir_all(&session_dir).unwrap();
+        MockProject { project_path, session_dir }
     }
 }
 
@@ -890,4 +907,162 @@ fn test_search_missing_required_arg_shows_usage_and_exits_nonzero() {
         "stderr should mention missing pattern or usage, got: {}",
         err
     );
+}
+
+// =============================================================================
+// claudex account and --config-dir tests
+// =============================================================================
+
+#[test]
+fn test_config_dir_env_var() {
+    // Sessions stored in a custom dir pointed to by CLAUDE_CONFIG_DIR should be found.
+    let world = MockWorld::new();
+    let custom_dir = world.home.path().join("custom-claude");
+    let project_path = "/claugrep-mock/env-var-proj";
+    let encoded = project_path.replace(['/', '.'], "-");
+    let session_dir = custom_dir.join("projects").join(&encoded);
+    fs::create_dir_all(&session_dir).unwrap();
+    let mut sb = SessionBuilder::new(
+        "env-var-sess".to_string(),
+        session_dir.join("env-var-sess.jsonl"),
+    );
+    sb = sb.user_message("ENV_VAR_CONFIG_DIR_CONTENT");
+    sb.done();
+
+    let out = world
+        .cmd()
+        .env("CLAUDE_CONFIG_DIR", &custom_dir)
+        .args(["last", "--project", project_path])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("ENV_VAR_CONFIG_DIR_CONTENT"),
+        "CLAUDE_CONFIG_DIR env var should point discovery to custom dir");
+}
+
+#[test]
+fn test_config_dir_flag() {
+    // Sessions stored in a custom dir pointed to by --config-dir flag should be found.
+    let world = MockWorld::new();
+    let custom_dir = world.home.path().join("flag-claude");
+    let project_path = "/claugrep-mock/flag-dir-proj";
+    let encoded = project_path.replace(['/', '.'], "-");
+    let session_dir = custom_dir.join("projects").join(&encoded);
+    fs::create_dir_all(&session_dir).unwrap();
+    let mut sb = SessionBuilder::new(
+        "flag-dir-sess".to_string(),
+        session_dir.join("flag-dir-sess.jsonl"),
+    );
+    sb = sb.user_message("FLAG_CONFIG_DIR_CONTENT");
+    sb.done();
+
+    let out = world
+        .cmd()
+        .args([
+            "--config-dir", custom_dir.to_str().unwrap(),
+            "last", "--project", project_path,
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("FLAG_CONFIG_DIR_CONTENT"),
+        "--config-dir flag should point discovery to the specified dir");
+}
+
+#[test]
+fn test_claudex_account_auto_discover() {
+    // Sessions under a claudex account dir should be found automatically by `last`
+    // even without any flags (auto-discovery of accounts).
+    let world = MockWorld::new();
+    let proj = world.account_project("myaccount", "auto-disc");
+    proj.session("auto-disc-sess")
+        .user_message("CLAUDEX_AUTO_DISCOVER_CONTENT")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["last"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("CLAUDEX_AUTO_DISCOVER_CONTENT"),
+        "sessions under claudex account should be found automatically");
+}
+
+#[test]
+fn test_account_flag_filters() {
+    // With --account foo, only sessions from that account should appear.
+    let world = MockWorld::new();
+
+    // Session in default ~/.claude
+    let default_proj = world.project("acct-filter-default");
+    default_proj.session("default-sess")
+        .user_message("ACCOUNT_FILTER_DEFAULT_CONTENT")
+        .done();
+
+    // Session in claudex account "foo"
+    let acct_proj = world.account_project("foo", "acct-filter-foo");
+    acct_proj.session("foo-sess")
+        .user_message("ACCOUNT_FILTER_FOO_CONTENT")
+        .done();
+
+    // Without --account: both should appear
+    let out_all = world.cmd().args(["last"]).output().unwrap();
+    assert!(out_all.status.success(), "stderr: {}", String::from_utf8_lossy(&out_all.stderr));
+    let text_all = strip_ansi(stdout(&out_all));
+    assert!(text_all.contains("ACCOUNT_FILTER_DEFAULT_CONTENT"), "default sessions should appear without --account");
+    assert!(text_all.contains("ACCOUNT_FILTER_FOO_CONTENT"), "account sessions should appear without --account");
+
+    // With --account foo: only foo sessions
+    let out_foo = world.cmd().args(["--account", "foo", "last"]).output().unwrap();
+    assert!(out_foo.status.success(), "stderr: {}", String::from_utf8_lossy(&out_foo.stderr));
+    let text_foo = strip_ansi(stdout(&out_foo));
+    assert!(text_foo.contains("ACCOUNT_FILTER_FOO_CONTENT"), "foo account session should appear with --account foo");
+    assert!(!text_foo.contains("ACCOUNT_FILTER_DEFAULT_CONTENT"),
+        "--account foo should not show default sessions");
+}
+
+#[test]
+fn test_account_flag_search() {
+    // search with --account should scope to that account's sessions only.
+    let world = MockWorld::new();
+
+    let default_proj = world.project("acct-search-default");
+    default_proj.session("dsess")
+        .user_message("ACCT_SEARCH_DEFAULT_ONLY")
+        .done();
+
+    let acct_proj = world.account_project("bar", "acct-search-bar");
+    acct_proj.session("bsess")
+        .user_message("ACCT_SEARCH_BAR_ONLY")
+        .done();
+
+    // Search for bar content with --account bar: should find it
+    let out_found = world
+        .cmd()
+        .args(["--account", "bar", "search", "ACCT_SEARCH_BAR_ONLY",
+               "--project", acct_proj.path()])
+        .output()
+        .unwrap();
+    assert!(out_found.status.success(), "stderr: {}", String::from_utf8_lossy(&out_found.stderr));
+    let text_found = strip_ansi(stdout(&out_found));
+    assert!(text_found.contains("ACCT_SEARCH_BAR_ONLY"), "should find bar session with --account bar");
+
+    // Search for default content with --account bar: should not find it (wrong account)
+    let out_miss = world
+        .cmd()
+        .args(["--account", "bar", "search", "ACCT_SEARCH_DEFAULT_ONLY",
+               "--project", default_proj.path()])
+        .output()
+        .unwrap();
+    // Either exits nonzero (no sessions in that path under bar account) or finds no matches
+    let text_miss = strip_ansi(stdout(&out_miss));
+    assert!(!text_miss.contains("ACCT_SEARCH_DEFAULT_ONLY"),
+        "--account bar should not find default sessions");
 }
