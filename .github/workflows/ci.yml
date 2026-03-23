@@ -14,7 +14,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov --locked
-      - run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - run: cargo llvm-cov --workspace --all-targets --lcov --output-path lcov.info
       - uses: coverallsapp/github-action@v2
         with:
           file: lcov.info
