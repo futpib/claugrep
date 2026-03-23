@@ -12,7 +12,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, get_worktree_paths};
+use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions};
 use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
@@ -243,17 +243,7 @@ fn main() {
                 sessions_with_matches,
             };
 
-            // Collect sessions from all git worktrees, deduplicating by file path
-            let worktree_paths = get_worktree_paths(&project_path);
-            let mut unique_paths: Vec<String> = worktree_paths;
-            if !unique_paths.contains(&project_path) {
-                unique_paths.push(project_path.clone());
-            }
-            let mut seen_paths = std::collections::HashSet::new();
-            let all_sessions: Vec<_> = unique_paths.iter()
-                .flat_map(|p| discover_sessions(p, None))
-                .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
-                .collect();
+            let all_sessions = discover_sessions_with_worktrees(&project_path);
 
             if all_sessions.is_empty() {
                 eprintln!("No session files found for project {}", project_path);
@@ -322,16 +312,7 @@ fn main() {
 
             let all_sessions: Vec<_> = if let Some(ref proj) = project {
                 let project_path = resolve_project(proj);
-                let worktree_paths = get_worktree_paths(&project_path);
-                let mut unique_paths: Vec<String> = worktree_paths;
-                if !unique_paths.contains(&project_path) {
-                    unique_paths.push(project_path.clone());
-                }
-                let mut seen_paths = std::collections::HashSet::new();
-                unique_paths.iter()
-                    .flat_map(|p| discover_sessions(p, None))
-                    .filter(|s| seen_paths.insert(s.file_path.to_string_lossy().to_string()))
-                    .collect()
+                discover_sessions_with_worktrees(&project_path)
             } else {
                 discover_all_sessions()
             };
