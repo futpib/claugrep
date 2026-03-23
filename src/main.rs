@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use std::io::Write;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
@@ -175,7 +175,15 @@ fn resolve_project(path: &PathBuf) -> String {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|e| {
+        // Print full help to stderr so the user sees all available subcommands
+        // and correct usage alongside the specific error message.
+        let mut cmd = Cli::command();
+        let _ = cmd.write_long_help(&mut std::io::stderr());
+        eprintln!();
+        e.print().expect("failed to write error");
+        std::process::exit(e.exit_code());
+    });
 
     match cli.command {
         Commands::Search {

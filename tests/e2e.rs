@@ -849,3 +849,45 @@ fn test_projects_encoded_path_in_json() {
     assert!(ep.contains('-'), "encodedPath should contain '-' separators");
     assert!(ep.contains("enctest"), "encodedPath should contain project name");
 }
+
+// =============================================================================
+// error handling — full help on incorrect invocations (issue #6)
+// =============================================================================
+
+fn stderr(out: &std::process::Output) -> &str {
+    std::str::from_utf8(&out.stderr).unwrap()
+}
+
+#[test]
+fn test_unknown_subcommand_shows_full_help_and_exits_nonzero() {
+    let world = MockWorld::new();
+
+    let out = world.cmd().args(["foobar"]).output().unwrap();
+
+    assert!(!out.status.success(), "unknown subcommand should exit nonzero");
+    let err = strip_ansi(stderr(&out));
+    // Full help must list the available subcommands
+    assert!(err.contains("search"), "stderr should contain 'search' subcommand");
+    assert!(err.contains("last"), "stderr should contain 'last' subcommand");
+    assert!(err.contains("dump"), "stderr should contain 'dump' subcommand");
+    assert!(err.contains("projects"), "stderr should contain 'projects' subcommand");
+    // The specific error should also appear
+    assert!(err.contains("foobar"), "stderr should mention the unrecognized subcommand");
+}
+
+#[test]
+fn test_search_missing_required_arg_shows_usage_and_exits_nonzero() {
+    let world = MockWorld::new();
+
+    // 'search' requires a PATTERN argument — omitting it is an error.
+    let out = world.cmd().args(["search"]).output().unwrap();
+
+    assert!(!out.status.success(), "missing required arg should exit nonzero");
+    let err = strip_ansi(stderr(&out));
+    // The error output should mention usage / the missing argument
+    assert!(
+        err.contains("PATTERN") || err.contains("required") || err.contains("Usage"),
+        "stderr should mention missing pattern or usage, got: {}",
+        err
+    );
+}
