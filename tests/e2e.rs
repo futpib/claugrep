@@ -1258,3 +1258,165 @@ fn test_since_invalid_date_exits_nonzero() {
     assert!(stderr.contains("cannot parse date") || stderr.contains("error"),
         "should print an error about the bad date");
 }
+
+// --before / --until date filter
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_before_sessions_filters_new_session() {
+    let world = MockWorld::new();
+    let proj = world.project("before-sessions");
+
+    // Old session: 10 days ago
+    proj.session("aaaa-old").user_message("OLD_BEFORE_CONTENT").done();
+    let old_path = proj.session_dir.join("aaaa-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10 * 24 * 3600));
+
+    // Recent session: 1 hour ago
+    proj.session("bbbb-new").user_message("NEW_BEFORE_CONTENT").done();
+    // mtime is already current (just created)
+
+    // --before yesterday: only the old session should appear (new is after yesterday)
+    let out = world
+        .cmd()
+        .args(["--before", "yesterday", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "should exit 0: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("aaaa-old"), "10-day-old session should appear before yesterday");
+    assert!(!text.contains("bbbb-new"), "recent session should be filtered out");
+}
+
+#[test]
+fn test_until_alias_for_before() {
+    let world = MockWorld::new();
+    let proj = world.project("until-alias");
+
+    proj.session("cccc-old").user_message("UNTIL_ALIAS_CONTENT").done();
+    let old_path = proj.session_dir.join("cccc-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10 * 24 * 3600));
+
+    proj.session("dddd-new").user_message("UNTIL_ALIAS_NEW").done();
+
+    // --until should behave identically to --before
+    let out = world
+        .cmd()
+        .args(["--until", "yesterday", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "should exit 0: {}", String::from_utf8_lossy(&out.stderr));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("cccc-old"), "--until should include old session");
+    assert!(!text.contains("dddd-new"), "--until should filter recent session");
+}
+
+#[test]
+fn test_before_search_filters_sessions() {
+    let world = MockWorld::new();
+    let proj = world.project("before-search");
+
+    // Both sessions contain the keyword; only the old one should match after filtering
+    proj.session("bsrc-old").user_message("BEFORE_SEARCH_KEYWORD").done();
+    let old_path = proj.session_dir.join("bsrc-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(10 * 24 * 3600));
+
+    proj.session("bsrc-new").user_message("BEFORE_SEARCH_KEYWORD").done();
+
+    let out = world
+        .cmd()
+        .args(["--before", "yesterday", "search", "BEFORE_SEARCH_KEYWORD", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "should exit 0: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("bsrc-old"), "old session should appear in matches");
+    assert!(!text.contains("bsrc-new"), "new session should be filtered out by --before");
+}
+
+#[test]
+fn test_before_iso_date_format() {
+    let world = MockWorld::new();
+    let proj = world.project("before-iso");
+
+    // Session 20 days old
+    proj.session("gggg-old").user_message("BEFORE_ISO_OLD").done();
+    let old_path = proj.session_dir.join("gggg-old.jsonl");
+    set_mtime(&old_path, SystemTime::now() - Duration::from_secs(20 * 24 * 3600));
+
+    // Session 5 days old
+    proj.session("hhhh-mid").user_message("BEFORE_ISO_MID").done();
+    let mid_path = proj.session_dir.join("hhhh-mid.jsonl");
+    set_mtime(&mid_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    // Cutoff: 10 days ago as ISO date
+    let cutoff = {
+        let d = chrono::Utc::now() - chrono::Duration::days(10);
+        d.format("%Y-%m-%d").to_string()
+    };
+
+    let out = world
+        .cmd()
+        .args(["--before", &cutoff, "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "should exit 0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("gggg-old"), "20-day-old session should appear before 10-day cutoff");
+    assert!(!text.contains("hhhh-mid"), "5-day-old session should be filtered out");
+}
+
+#[test]
+fn test_before_and_after_combined() {
+    let world = MockWorld::new();
+    let proj = world.project("before-after-combined");
+
+    // 15 days old — outside both windows
+    proj.session("iiii-ancient").user_message("COMBINED_ANCIENT").done();
+    let ancient_path = proj.session_dir.join("iiii-ancient.jsonl");
+    set_mtime(&ancient_path, SystemTime::now() - Duration::from_secs(15 * 24 * 3600));
+
+    // 5 days old — inside the window (after 10 days ago, before 2 days ago)
+    proj.session("jjjj-mid").user_message("COMBINED_MID").done();
+    let mid_path = proj.session_dir.join("jjjj-mid.jsonl");
+    set_mtime(&mid_path, SystemTime::now() - Duration::from_secs(5 * 24 * 3600));
+
+    // 1 hour old — outside window (after "2 days ago" cutoff)
+    proj.session("kkkk-recent").user_message("COMBINED_RECENT").done();
+    // mtime is already current
+
+    let out = world
+        .cmd()
+        .args(["--after", "10 days ago", "--before", "2 days ago",
+               "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "should exit 0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("jjjj-mid"), "5-day-old session should be in window");
+    assert!(!text.contains("iiii-ancient"), "15-day-old session should be filtered by --after");
+    assert!(!text.contains("kkkk-recent"), "recent session should be filtered by --before");
+}
+
+#[test]
+fn test_before_invalid_date_exits_nonzero() {
+    let world = MockWorld::new();
+    let proj = world.project("before-invalid");
+    proj.session("llll").user_message("BEFORE_INVALID_TEST").done();
+
+    let out = world
+        .cmd()
+        .args(["--before", "not-a-date-xyz", "sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "invalid --before value should exit nonzero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot parse date") || stderr.contains("error"),
+        "should print an error about the bad date");
+}

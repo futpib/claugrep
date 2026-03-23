@@ -32,6 +32,10 @@ struct Cli {
     #[arg(long = "after", alias = "since", global = true)]
     after: Option<String>,
 
+    /// Only show sessions modified before the given date (git-compatible: yesterday, '2 days ago', '2026-03-24', Monday, 'last week')
+    #[arg(long = "before", alias = "until", global = true)]
+    before: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -281,6 +285,22 @@ fn filter_sessions_since(
     }
 }
 
+fn filter_sessions_before(
+    sessions: Vec<sessions::SessionFile>,
+    before: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<sessions::SessionFile> {
+    match before {
+        None => sessions,
+        Some(cutoff) => sessions
+            .into_iter()
+            .filter(|s| {
+                let mtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
+                mtime < cutoff
+            })
+            .collect(),
+    }
+}
+
 fn resolve_project(path: &PathBuf) -> String {
     path.canonicalize()
         .unwrap_or_else(|_| path.clone())
@@ -342,6 +362,17 @@ fn main() {
         },
     };
 
+    let before: Option<chrono::DateTime<chrono::Utc>> = match cli.before.as_deref() {
+        None => None,
+        Some(v) => match parse_since_date(v) {
+            Ok(dt) => Some(dt),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        },
+    };
+
     match cli.command {
         Commands::Search {
             pattern, user, assistant, bash_command, bash_output,
@@ -385,9 +416,12 @@ fn main() {
                 sessions_with_matches,
             };
 
-            let all_sessions = filter_sessions_since(
-                discover_sessions_across_configs(&project_path, &config_dirs),
-                since,
+            let all_sessions = filter_sessions_before(
+                filter_sessions_since(
+                    discover_sessions_across_configs(&project_path, &config_dirs),
+                    since,
+                ),
+                before,
             );
 
             if all_sessions.is_empty() {
@@ -455,14 +489,17 @@ fn main() {
         Commands::Last { count, project, targets, max_line_width, json } => {
             let target_set = parse_targets(&targets);
 
-            let all_sessions: Vec<_> = filter_sessions_since(
-                if let Some(ref proj) = project {
-                    let project_path = resolve_project(proj);
-                    discover_sessions_across_configs(&project_path, &config_dirs)
-                } else {
-                    discover_all_sessions(&config_dirs)
-                },
-                since,
+            let all_sessions: Vec<_> = filter_sessions_before(
+                filter_sessions_since(
+                    if let Some(ref proj) = project {
+                        let project_path = resolve_project(proj);
+                        discover_sessions_across_configs(&project_path, &config_dirs)
+                    } else {
+                        discover_all_sessions(&config_dirs)
+                    },
+                    since,
+                ),
+                before,
             );
 
             if all_sessions.is_empty() {
@@ -515,9 +552,12 @@ fn main() {
             // For Sessions command, use the first config dir
             let config_dir = config_dirs.first().map(|(_, d)| d.as_path())
                 .unwrap_or_else(|| Path::new(""));
-            let sessions = filter_sessions_since(
-                discover_sessions(&project_path, None, config_dir),
-                since,
+            let sessions = filter_sessions_before(
+                filter_sessions_since(
+                    discover_sessions(&project_path, None, config_dir),
+                    since,
+                ),
+                before,
             );
 
             if sessions.is_empty() {
@@ -607,9 +647,12 @@ fn main() {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
-            let all_sessions = filter_sessions_since(
-                discover_sessions_across_configs(&project_path, &config_dirs),
-                since,
+            let all_sessions = filter_sessions_before(
+                filter_sessions_since(
+                    discover_sessions_across_configs(&project_path, &config_dirs),
+                    since,
+                ),
+                before,
             );
             let sessions = match resolve_session(Some(&session), &all_sessions) {
                 Ok(s) => s,
