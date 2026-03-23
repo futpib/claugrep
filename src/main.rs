@@ -6,6 +6,8 @@ mod output;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use std::io::Write;
+
 use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
@@ -229,41 +231,50 @@ fn main() {
             }
 
             let sessions = resolve_session(session.as_deref(), &all_sessions);
-            let matches = search_sessions(&sessions, &options);
+            let stdout = std::io::stdout();
 
             if sessions_with_matches {
                 let mut seen = std::collections::HashSet::new();
-                for m in &matches {
+                let total = search_sessions(&sessions, &options, |m| {
                     let path = sessions.iter()
                         .find(|s| s.session_id == m.session_id)
                         .map(|s| s.file_path.to_string_lossy().to_string())
                         .unwrap_or_else(|| m.session_id.clone());
                     if seen.insert(path.clone()) {
-                        println!("{}", path);
+                        let mut out = stdout.lock();
+                        writeln!(out, "{}", path).unwrap();
                     }
-                }
-                if matches.is_empty() { std::process::exit(1); }
+                });
+                if total == 0 { std::process::exit(1); }
             } else if json {
-                let output: Vec<_> = matches.iter().map(|m| json!({
-                    "matchNumber": m.match_number,
-                    "sessionId": m.session_id,
-                    "timestamp": m.timestamp,
-                    "target": m.target.as_str(),
-                    "toolName": m.tool_name,
-                    "matchedLines": m.matched_lines.iter().map(|ml| json!({
-                        "lineNumber": ml.line_number,
-                        "line": ml.line,
-                        "isMatch": ml.is_match,
-                    })).collect::<Vec<_>>(),
-                })).collect();
+                // JSON must be a single valid array, so collect then print.
+                let mut output: Vec<serde_json::Value> = vec![];
+                search_sessions(&sessions, &options, |m| {
+                    output.push(json!({
+                        "matchNumber": m.match_number,
+                        "sessionId": m.session_id,
+                        "timestamp": m.timestamp,
+                        "target": m.target.as_str(),
+                        "toolName": m.tool_name,
+                        "matchedLines": m.matched_lines.iter().map(|ml| json!({
+                            "lineNumber": ml.line_number,
+                            "line": ml.line,
+                            "isMatch": ml.is_match,
+                        })).collect::<Vec<_>>(),
+                    }));
+                });
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else {
                 reset_truncation_state();
-                for (i, m) in matches.iter().enumerate() {
-                    if i > 0 { println!(); }
-                    println!("{}", format_match(m, &patterns, max_line_width));
-                }
-                println!("{}", format_summary(matches.len(), &project_path, sessions.len()));
+                let mut first = true;
+                let total = search_sessions(&sessions, &options, |m| {
+                    let mut out = stdout.lock();
+                    if !first { writeln!(out).unwrap(); }
+                    first = false;
+                    writeln!(out, "{}", format_match(&m, &patterns, max_line_width)).unwrap();
+                    out.flush().unwrap();
+                });
+                println!("{}", format_summary(total, &project_path, sessions.len()));
                 if get_did_truncate() {
                     eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
                 }

@@ -76,8 +76,12 @@ fn find_matches(
     }).collect())
 }
 
-pub fn search_sessions(sessions: &[SessionFile], options: &SearchOptions) -> Vec<SearchMatch> {
-    let mut results = vec![];
+/// Search sessions, calling `on_match` for each result as it is found.
+/// Returns the total number of matches.
+pub fn search_sessions<F>(sessions: &[SessionFile], options: &SearchOptions, mut on_match: F) -> usize
+where
+    F: FnMut(SearchMatch),
+{
     let mut match_number = 0;
 
     for session in sessions {
@@ -106,7 +110,7 @@ pub fn search_sessions(sessions: &[SessionFile], options: &SearchOptions) -> Vec
                 options.context_after,
             ) {
                 match_number += 1;
-                results.push(SearchMatch {
+                on_match(SearchMatch {
                     match_number,
                     session_id: content.session_id,
                     timestamp: content.timestamp,
@@ -119,7 +123,7 @@ pub fn search_sessions(sessions: &[SessionFile], options: &SearchOptions) -> Vec
         }
     }
 
-    results
+    match_number
 }
 
 #[cfg(test)]
