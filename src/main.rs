@@ -417,6 +417,7 @@ fn main() {
                     json!({
                         "path": p.decoded_path,
                         "encodedPath": p.encoded_path,
+                        "verified": p.verified,
                         "sessionCount": p.session_count,
                         "latestMtime": mtime,
                     })
@@ -430,11 +431,13 @@ fn main() {
                             dt.format("%Y-%m-%d %H:%M:%S").to_string()
                         })
                         .unwrap_or_else(|| "no sessions".to_string());
-                    println!("{} ({} session{}) {}",
+                    let unverified = if p.verified { "" } else { " [unverified]" };
+                    println!("{} ({} session{}) {}{}",
                         p.decoded_path,
                         p.session_count,
                         if p.session_count == 1 { "" } else { "s" },
-                        ts_str);
+                        ts_str,
+                        unverified);
                 }
                 eprintln!("{} project{}", projects.len(), if projects.len() == 1 { "" } else { "s" });
             }

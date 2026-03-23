@@ -150,14 +150,53 @@ pub fn discover_sessions_with_worktrees(project_path: &str) -> Vec<SessionFile> 
 
 /// Information about a single project directory.
 pub struct ProjectInfo {
-    /// Raw directory name under ~/.claude/projects/ (e.g. `-home-user-code-proj`)
     pub encoded_path: String,
-    /// Best-effort decoded path: replace `-` with `/` (lossy for paths with original `-`)
     pub decoded_path: String,
-    /// Number of top-level `.jsonl` session files
+    pub verified: bool,
     pub session_count: usize,
-    /// Most recent session file mtime, if any
     pub latest_mtime: Option<std::time::SystemTime>,
+}
+
+fn try_verify_decoded_path(encoded: &str) -> (String, bool) {
+    let naive = encoded.replace('-', "/");
+    if Path::new(&naive).exists() {
+        return (naive, true);
+    }
+    let trimmed = encoded.trim_start_matches('-');
+    let tokens: Vec<&str> = trimmed.split('-').collect();
+    if !tokens.is_empty() {
+        if let Some(found) = walk_and_verify(Path::new("/"), &tokens) {
+            return (found, true);
+        }
+    }
+    (encoded.to_string(), false)
+}
+
+fn walk_and_verify(dir: &Path, tokens: &[&str]) -> Option<String> {
+    if tokens.is_empty() {
+        return Some(dir.to_string_lossy().into_owned());
+    }
+    for take in 1..=tokens.len() {
+        let name_hyphen = tokens[..take].join("-");
+        let child = dir.join(&name_hyphen);
+        if child.exists() {
+            if let Some(result) = walk_and_verify(&child, &tokens[take..]) {
+                return Some(result);
+            }
+        }
+        if take > 1 {
+            let name_dot = tokens[..take].join(".");
+            if name_dot != name_hyphen {
+                let child_dot = dir.join(&name_dot);
+                if child_dot.exists() {
+                    if let Some(result) = walk_and_verify(&child_dot, &tokens[take..]) {
+                        return Some(result);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// List all project directories under ~/.claude/projects/.
@@ -199,11 +238,12 @@ pub fn discover_projects() -> Vec<ProjectInfo> {
                 }
             }
 
-            let decoded = encoded.replace('-', "/");
+            let (decoded, verified) = try_verify_decoded_path(&encoded);
 
             Some(ProjectInfo {
                 encoded_path: encoded,
                 decoded_path: decoded,
+                verified,
                 session_count,
                 latest_mtime,
             })
@@ -581,5 +621,42 @@ mod tests {
         for p in &paths {
             assert!(p.starts_with('/'), "expected absolute path, got: {}", p);
         }
+    }
+    #[test]
+    fn test_try_verify_decoded_path_existing() {
+        let (path, verified) = try_verify_decoded_path("-tmp");
+        assert!(verified);
+        assert_eq!(path, "/tmp");
+    }
+
+    #[test]
+    fn test_try_verify_decoded_path_nonexistent() {
+        let (path, verified) = try_verify_decoded_path("-absolutely-nonexistent-xyz-123456");
+        assert!(!verified);
+        assert_eq!(path, "-absolutely-nonexistent-xyz-123456");
+    }
+
+    #[test]
+    fn test_try_verify_decoded_path_hyphen_in_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("my-project");
+        std::fs::create_dir(&dir).unwrap();
+        let dir_str = dir.to_string_lossy().to_string();
+        let encoded = encode_project_path(&dir_str);
+        let (path, verified) = try_verify_decoded_path(&encoded);
+        assert!(verified, "encoded={}", encoded);
+        assert_eq!(path, dir_str);
+    }
+
+    #[test]
+    fn test_try_verify_decoded_path_dot_in_component() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("my.project");
+        std::fs::create_dir(&dir).unwrap();
+        let dir_str = dir.to_string_lossy().to_string();
+        let encoded = encode_project_path(&dir_str);
+        let (path, verified) = try_verify_decoded_path(&encoded);
+        assert!(verified, "encoded={}", encoded);
+        assert_eq!(path, dir_str);
     }
 }
