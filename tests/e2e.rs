@@ -1,0 +1,741 @@
+//! Hermetic end-to-end tests using a self-contained mock world.
+//!
+//! Each test builds synthetic Claude session JSONL files in a temporary HOME
+//! directory and invokes the real `claugrep` binary against them.  No real
+//! Claude session data is required — every test is fully deterministic.
+
+use std::fs;
+use std::io::Write as IoWrite;
+use std::path::PathBuf;
+use std::process::Command;
+
+// ── Mock world ────────────────────────────────────────────────────────────────
+
+/// Owns a temporary HOME directory.  All `claugrep` commands spawned via
+/// `world.cmd()` see this directory as `$HOME`.
+struct MockWorld {
+    home: tempfile::TempDir,
+}
+
+impl MockWorld {
+    fn new() -> Self {
+        MockWorld {
+            home: tempfile::TempDir::new().unwrap(),
+        }
+    }
+
+    /// Return a `Command` for the claugrep binary with `HOME` overridden.
+    fn cmd(&self) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_claugrep"));
+        cmd.env("HOME", self.home.path());
+        cmd
+    }
+
+    /// Create a named mock project and return a handle for adding sessions.
+    ///
+    /// The project path `/claugrep-mock/<name>` is non-existent on the real
+    /// filesystem, so `canonicalize()` falls back to the raw string — which
+    /// is exactly what `resolve_project` does.
+    fn project(&self, name: &str) -> MockProject {
+        let project_path = format!("/claugrep-mock/{}", name);
+        let encoded = project_path.replace(['/', '.'], "-");
+        let session_dir = self
+            .home
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join(&encoded);
+        fs::create_dir_all(&session_dir).unwrap();
+        MockProject {
+            project_path,
+            session_dir,
+        }
+    }
+}
+
+struct MockProject {
+    project_path: String,
+    session_dir: PathBuf,
+}
+
+impl MockProject {
+    fn path(&self) -> &str {
+        &self.project_path
+    }
+
+    /// Create a normal (non-subagent) session file.
+    fn session(&self, id: &str) -> SessionBuilder {
+        let path = self.session_dir.join(format!("{}.jsonl", id));
+        SessionBuilder::new(id.to_string(), path)
+    }
+
+    /// Create a subagent session stored in `<parent_id>/subagents/agent-<name>.jsonl`.
+    fn subagent_session(&self, parent_id: &str, agent_name: &str) -> SessionBuilder {
+        let dir = self.session_dir.join(parent_id).join("subagents");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("agent-{}.jsonl", agent_name));
+        // Also ensure the parent session file exists (even empty) so
+        // discover_sessions finds the parent and loads its subagents.
+        let parent_path = self.session_dir.join(format!("{}.jsonl", parent_id));
+        if !parent_path.exists() {
+            fs::File::create(&parent_path).unwrap();
+        }
+        SessionBuilder::new(parent_id.to_string(), path)
+    }
+}
+
+// ── Session builder ───────────────────────────────────────────────────────────
+
+struct SessionBuilder {
+    session_id: String,
+    file: fs::File,
+    tool_counter: u32,
+    ts_secs: u32,
+}
+
+impl SessionBuilder {
+    fn new(session_id: String, path: PathBuf) -> Self {
+        SessionBuilder {
+            session_id,
+            file: fs::File::create(path).unwrap(),
+            tool_counter: 0,
+            ts_secs: 0,
+        }
+    }
+
+    /// Advance the internal clock and return an ISO-8601 timestamp string.
+    fn next_ts(&mut self) -> String {
+        self.ts_secs += 1;
+        let h = self.ts_secs / 3600;
+        let m = (self.ts_secs % 3600) / 60;
+        let s = self.ts_secs % 60;
+        format!("2024-01-01T{:02}:{:02}:{:02}Z", h, m, s)
+    }
+
+    fn write(&mut self, v: serde_json::Value) {
+        writeln!(self.file, "{}", v).unwrap();
+    }
+
+    fn user_message(mut self, text: &str) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    fn assistant_message(mut self, text: &str) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write a Bash tool-use + tool-result pair (bash-command + bash-output).
+    fn bash(mut self, cmd: &str, output: &str) -> Self {
+        self.tool_counter += 1;
+        let id = format!("toolu_{:04}", self.tool_counter);
+        let ts1 = self.next_ts();
+        let ts2 = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": id, "name": "Bash",
+                "input": {"command": cmd}
+            }]},
+            "timestamp": ts1,
+            "sessionId": sid,
+        }));
+        let id2 = id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": id2, "content": output
+            }]},
+            "timestamp": ts2,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write a non-Bash tool-use + tool-result pair (tool-use + tool-result).
+    fn tool(mut self, name: &str, input_key: &str, input_val: &str, output: &str) -> Self {
+        self.tool_counter += 1;
+        let id = format!("toolu_{:04}", self.tool_counter);
+        let ts1 = self.next_ts();
+        let ts2 = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": id, "name": name,
+                "input": {input_key: input_val}
+            }]},
+            "timestamp": ts1,
+            "sessionId": sid,
+        }));
+        let id2 = id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": id2, "content": output
+            }]},
+            "timestamp": ts2,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    fn compact_summary(mut self, text: &str) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "isCompactSummary": true,
+            "message": {"role": "user", "content": text},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    fn done(mut self) {
+        self.file.flush().unwrap();
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn stdout(out: &std::process::Output) -> &str {
+    std::str::from_utf8(&out.stdout).unwrap()
+}
+
+// Strip ANSI escape sequences for plain-text assertions.
+fn strip_ansi(s: &str) -> String {
+    let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    re.replace_all(s, "").to_string()
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// last subcommand
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_last_basic() {
+    let world = MockWorld::new();
+    let proj = world.project("alpha");
+    proj.session("sess-aaa")
+        .user_message("LAST_USER_HELLO")
+        .assistant_message("LAST_ASST_WORLD")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["last", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("LAST_USER_HELLO"), "expected user message in output");
+    assert!(text.contains("LAST_ASST_WORLD"), "expected assistant message in output");
+}
+
+#[test]
+fn test_last_n_count() {
+    let world = MockWorld::new();
+    let proj = world.project("count-test");
+    // Write 5 user messages; request only 2.
+    let mut builder = proj.session("sess-cnt");
+    for i in 0..5 {
+        builder = builder.user_message(&format!("COUNT_MSG_{}", i));
+    }
+    builder.done();
+
+    let out = world
+        .cmd()
+        .args(["last", "-n", "2", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    // Last 2 messages should be COUNT_MSG_3 and COUNT_MSG_4.
+    assert!(text.contains("COUNT_MSG_3") || text.contains("COUNT_MSG_4"),
+        "expected recent messages");
+    assert!(!text.contains("COUNT_MSG_0"),
+        "should not show early message when -n 2");
+}
+
+#[test]
+fn test_last_project_scoped() {
+    let world = MockWorld::new();
+    let proj_a = world.project("scope-a");
+    let proj_b = world.project("scope-b");
+    proj_a.session("sess-a").user_message("ONLY_IN_PROJECT_A").done();
+    proj_b.session("sess-b").user_message("ONLY_IN_PROJECT_B").done();
+
+    // --project should scope to proj_a only.
+    let out = world
+        .cmd()
+        .args(["last", "--project", proj_a.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("ONLY_IN_PROJECT_A"));
+    assert!(!text.contains("ONLY_IN_PROJECT_B"),
+        "scoped project should not show other project's messages");
+}
+
+#[test]
+fn test_last_json_output() {
+    let world = MockWorld::new();
+    let proj = world.project("last-json");
+    proj.session("sess-lj")
+        .user_message("LAST_JSON_CONTENT")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["last", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out))
+        .expect("--json must produce valid JSON");
+    let arr = parsed.as_array().expect("expected JSON array");
+    assert!(!arr.is_empty());
+    let first = &arr[0];
+    assert!(first["sessionId"].is_string());
+    assert!(first["timestamp"].is_string());
+    assert!(first["target"].is_string());
+    assert!(first["text"].is_string());
+    assert!(first["text"].as_str().unwrap().contains("LAST_JSON_CONTENT"));
+}
+
+#[test]
+fn test_last_missing_project_exits_nonzero() {
+    let world = MockWorld::new();
+    // Project exists in path string but has no sessions in mock home.
+    let out = world
+        .cmd()
+        .args(["last", "--project", "/claugrep-mock/no-such-project"])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "should exit nonzero when no sessions found");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// search — target flags
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_assistant_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("asst-flag");
+    proj.session("sess-af")
+        .user_message("USER_ONLY_TEXT_AF")
+        .assistant_message("ASST_UNIQUE_TEXT_AF")
+        .done();
+
+    // --assistant finds assistant text.
+    let found = world
+        .cmd()
+        .args(["search", "ASST_UNIQUE_TEXT_AF", "--assistant", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"));
+
+    // --user does NOT find it.
+    let miss = world
+        .cmd()
+        .args(["search", "ASST_UNIQUE_TEXT_AF", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"));
+}
+
+#[test]
+fn test_search_bash_command_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("bash-cmd-flag");
+    proj.session("sess-bc")
+        .bash("BASH_CMD_UNIQUE_XYZ", "some output")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "BASH_CMD_UNIQUE_XYZ", "--bash-command", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
+        "bash-command flag should find the command text");
+}
+
+#[test]
+fn test_search_bash_output_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("bash-out-flag");
+    proj.session("sess-bo")
+        .bash("ls", "BASH_OUTPUT_UNIQUE_QRS")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "BASH_OUTPUT_UNIQUE_QRS", "--bash-output", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
+        "bash-output flag should find the command output");
+}
+
+#[test]
+fn test_search_tool_use_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("tool-use-flag");
+    proj.session("sess-tu")
+        .tool("Read", "file_path", "TOOL_USE_UNIQUE_PATH_ABC", "file contents")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TOOL_USE_UNIQUE_PATH_ABC", "--tool-use", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
+        "tool-use flag should find the tool input");
+}
+
+#[test]
+fn test_search_tool_result_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("tool-result-flag");
+    proj.session("sess-tr")
+        .tool("Read", "file_path", "/some/path", "TOOL_RESULT_UNIQUE_DEF")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TOOL_RESULT_UNIQUE_DEF", "--tool-result", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
+        "tool-result flag should find the tool output");
+}
+
+#[test]
+fn test_search_subagent_prompt_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("subagent-flag");
+    // Parent session (regular, so its messages are "user" type).
+    proj.session("parent-sess-sp").user_message("PARENT_MSG").done();
+    // Subagent session — its messages become "subagent-prompt".
+    proj.subagent_session("parent-sess-sp", "agent-01")
+        .user_message("SUBAGENT_UNIQUE_PROMPT_GHI")
+        .done();
+
+    // --subagent-prompt finds the subagent's user message.
+    let found = world
+        .cmd()
+        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "--subagent-prompt",
+               "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "subagent-prompt flag should find subagent messages");
+
+    // --user does NOT find subagent messages.
+    let miss = world
+        .cmd()
+        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "--user should not match subagent prompts");
+}
+
+#[test]
+fn test_search_compact_summary_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("compact-flag");
+    proj.session("sess-cs")
+        .compact_summary("COMPACT_SUM_UNIQUE_JKL")
+        .done();
+
+    // --compact-summary finds the summary.
+    let found = world
+        .cmd()
+        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "--compact-summary",
+               "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "compact-summary flag should find summaries");
+
+    // --user does NOT find compact summaries.
+    let miss = world
+        .cmd()
+        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "--user should not match compact summaries");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// search — other untested flags
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_session_flag_scopes_to_one_session() {
+    let world = MockWorld::new();
+    let proj = world.project("session-scope");
+    proj.session("aaaa1111-0000-0000-0000-000000000000")
+        .user_message("ONLY_IN_SESSION_AAAA")
+        .done();
+    proj.session("bbbb2222-0000-0000-0000-000000000000")
+        .user_message("ONLY_IN_SESSION_BBBB")
+        .done();
+
+    // Scoped to "aaaa" prefix: finds AAAA text, not BBBB.
+    let out_aaaa = world
+        .cmd()
+        .args(["search", "ONLY_IN_SESSION", "--user",
+               "--session", "aaaa", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out_aaaa.status.success());
+    let text_aaaa = strip_ansi(stdout(&out_aaaa));
+    assert!(text_aaaa.contains("ONLY_IN_SESSION_AAAA"));
+    assert!(!text_aaaa.contains("ONLY_IN_SESSION_BBBB"),
+        "--session should restrict to matching session only");
+}
+
+#[test]
+fn test_search_before_context() {
+    let world = MockWorld::new();
+    let proj = world.project("before-ctx");
+    // Multi-line user message: the parser extracts the whole text as one block.
+    // find_matches splits on '\n', so context works within the text.
+    proj.session("sess-bctx")
+        .user_message("line_alpha\nline_beta\nTARGET_LINE_BCTX\nline_delta")
+        .done();
+
+    let no_ctx = world
+        .cmd()
+        .args(["search", "TARGET_LINE_BCTX", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    let with_b = world
+        .cmd()
+        .args(["search", "TARGET_LINE_BCTX", "--user", "-B", "1", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let lines_no_ctx = strip_ansi(stdout(&no_ctx)).lines().count();
+    let lines_with_b = strip_ansi(stdout(&with_b)).lines().count();
+    assert!(lines_with_b >= lines_no_ctx,
+        "-B 1 should produce at least as many lines as no context");
+    assert!(strip_ansi(stdout(&with_b)).contains("line_beta"),
+        "-B 1 should show the line before the match");
+}
+
+#[test]
+fn test_search_after_context() {
+    let world = MockWorld::new();
+    let proj = world.project("after-ctx");
+    proj.session("sess-actx")
+        .user_message("line_one\nTARGET_LINE_ACTX\nline_three\nline_four")
+        .done();
+
+    let no_ctx = world
+        .cmd()
+        .args(["search", "TARGET_LINE_ACTX", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    let with_a = world
+        .cmd()
+        .args(["search", "TARGET_LINE_ACTX", "--user", "-A", "1", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let lines_no_ctx = strip_ansi(stdout(&no_ctx)).lines().count();
+    let lines_with_a = strip_ansi(stdout(&with_a)).lines().count();
+    assert!(lines_with_a >= lines_no_ctx,
+        "-A 1 should produce at least as many lines as no context");
+    assert!(strip_ansi(stdout(&with_a)).contains("line_three"),
+        "-A 1 should show the line after the match");
+}
+
+#[test]
+fn test_search_max_line_width_unlimited() {
+    let world = MockWorld::new();
+    let proj = world.project("line-width");
+    // Build a 300-char message: search term at the start, unique tail at the end.
+    let tail = "UNIQUE_TAIL_MNO";
+    let padding = "x".repeat(300 - "LINEWIDTH_SEARCH ".len() - tail.len());
+    let long_msg = format!("LINEWIDTH_SEARCH {}{}", padding, tail);
+    assert!(long_msg.len() > 200);
+
+    proj.session("sess-lw").user_message(&long_msg).done();
+
+    // Default max_line_width=200: tail should be truncated away.
+    let default_out = world
+        .cmd()
+        .args(["search", "LINEWIDTH_SEARCH", "--user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(default_out.status.success());
+    let default_text = strip_ansi(stdout(&default_out));
+    assert!(!default_text.contains(tail),
+        "default max-line-width should truncate the tail");
+
+    // --max-line-width 0: full line visible.
+    let unlimited_out = world
+        .cmd()
+        .args(["search", "LINEWIDTH_SEARCH", "--user",
+               "--max-line-width", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(unlimited_out.status.success());
+    let unlimited_text = strip_ansi(stdout(&unlimited_out));
+    assert!(unlimited_text.contains(tail),
+        "--max-line-width 0 should show the full line including tail");
+}
+
+#[test]
+fn test_search_missing_project_exits_nonzero() {
+    let world = MockWorld::new();
+    let out = world
+        .cmd()
+        .args(["search", "anything", "--project", "/claugrep-mock/no-such-project"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(),
+        "search with no sessions should exit nonzero");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// dump subcommand
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_dump_all_sessions() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-all");
+    proj.session("sess-da1").user_message("DUMP_ALL_SESSION_ONE").done();
+    proj.session("sess-da2").user_message("DUMP_ALL_SESSION_TWO").done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_ALL_SESSION_ONE"), "expected session 1 content");
+    assert!(text.contains("DUMP_ALL_SESSION_TWO"), "expected session 2 content");
+}
+
+#[test]
+fn test_dump_uuid_prefix_positive_match() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-prefix");
+    proj.session("aaaa-prefix-sess-001").user_message("DUMP_PREFIX_AAAA_CONTENT").done();
+    proj.session("bbbb-prefix-sess-002").user_message("DUMP_PREFIX_BBBB_CONTENT").done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "aaaa-prefix", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_PREFIX_AAAA_CONTENT"),
+        "expected session matching prefix");
+    assert!(!text.contains("DUMP_PREFIX_BBBB_CONTENT"),
+        "should not dump non-matching session");
+}
+
+#[test]
+fn test_dump_offset_zero_latest_session() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-offset");
+    // One session is enough to verify offset 0 works without crashing.
+    proj.session("sess-offset-zero")
+        .user_message("DUMP_OFFSET_ZERO_TEXT")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_OFFSET_ZERO_TEXT"),
+        "dump 0 should return the session content");
+}
+
+#[test]
+fn test_dump_multi_targets() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-multi-tgt");
+    proj.session("sess-mt")
+        .user_message("DUMP_MT_USER_TEXT")
+        .bash("DUMP_MT_BASH_CMD", "DUMP_MT_BASH_OUT")
+        .done();
+
+    // user,bash-command: user message and bash command appear; bash output does not.
+    let out = world
+        .cmd()
+        .args(["dump", "1", "--targets", "user,bash-command", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_MT_USER_TEXT"),   "expected user text");
+    assert!(text.contains("DUMP_MT_BASH_CMD"),    "expected bash command");
+    assert!(!text.contains("DUMP_MT_BASH_OUT"),   "bash output should be excluded");
+
+    // bash-output only: neither user nor bash-command appear.
+    let out2 = world
+        .cmd()
+        .args(["dump", "1", "--targets", "bash-output", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out2.status.success());
+    let text2 = strip_ansi(stdout(&out2));
+    assert!(text2.contains("DUMP_MT_BASH_OUT"),  "expected bash output");
+    assert!(!text2.contains("DUMP_MT_USER_TEXT"), "user text should be excluded");
+}
