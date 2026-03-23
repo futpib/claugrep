@@ -1,5 +1,7 @@
 # claugrep
 
+[![Coverage Status](https://coveralls.io/repos/github/futpib-bot/claugrep/badge.svg?branch=master)](https://coveralls.io/github/futpib-bot/claugrep?branch=master)
+
 Browse, search, and export Claude Code conversation transcripts from the command line.
 
 `claugrep` reads the JSONL session files written by [Claude Code](https://claude.ai/code) to `~/.claude/projects/` and lets you grep across them, list sessions, or dump their content as plain text.
