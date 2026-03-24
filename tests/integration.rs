@@ -29,6 +29,111 @@ fn project_has_sessions(project: &str) -> bool {
     dir.exists()
 }
 
+// ── --before / --until date filter ────────────────────────────────────────────
+
+#[test]
+fn test_before_far_future_shows_all_sessions() {
+    if !project_has_sessions(&home_project()) {
+        eprintln!("SKIP: no Claude sessions found");
+        return;
+    }
+    // All sessions should pre-date year 2099 — result should be non-empty.
+    let out = claugrep()
+        .args(["--before", "2099-01-01", "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.trim().is_empty(), "--before far future should still show sessions");
+}
+
+#[test]
+fn test_before_ancient_past_exits_nonzero() {
+    if !project_has_sessions(&home_project()) {
+        eprintln!("SKIP: no Claude sessions found");
+        return;
+    }
+    // No sessions exist from before 1971 — should exit nonzero.
+    let out = claugrep()
+        .args(["--before", "1971-01-01", "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(!out.status.success(), "--before ancient past should exit nonzero (no sessions)");
+}
+
+#[test]
+fn test_until_alias_matches_before() {
+    if !project_has_sessions(&home_project()) {
+        eprintln!("SKIP: no Claude sessions found");
+        return;
+    }
+    let out_before = claugrep()
+        .args(["--before", "2099-01-01", "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    let out_until = claugrep()
+        .args(["--until", "2099-01-01", "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(out_before.status.success());
+    assert!(out_until.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out_before.stdout),
+        String::from_utf8_lossy(&out_until.stdout),
+        "--until should produce identical output to --before"
+    );
+}
+
+#[test]
+fn test_before_search_far_future_finds_results() {
+    if !project_has_sessions(&home_project()) {
+        eprintln!("SKIP: no Claude sessions found");
+        return;
+    }
+    // With --before far-future, search should behave normally.
+    let out = claugrep()
+        .args(["--before", "2099-01-01", "search", "claugrep", "--user", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("claugrep"), "--before 2099 should not filter out real sessions");
+}
+
+#[test]
+fn test_after_and_before_combined_wide_window() {
+    if !project_has_sessions(&home_project()) {
+        eprintln!("SKIP: no Claude sessions found");
+        return;
+    }
+    // A window from 1970 to 2099 should include all sessions.
+    let out = claugrep()
+        .args(["--after", "1970-01-01", "--before", "2099-01-01",
+               "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.trim().is_empty(), "wide window should include sessions");
+}
+
+#[test]
+fn test_before_invalid_date_exits_nonzero() {
+    let out = claugrep()
+        .args(["--before", "not-a-valid-date-xyz", "sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+
+    assert!(!out.status.success(), "invalid --before value should exit nonzero");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot parse date") || stderr.contains("error"));
+}
+
 // ── sessions command ──────────────────────────────────────────────────────────
 
 #[test]
