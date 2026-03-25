@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions};
-use crate::output::{format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
+use crate::output::{format_diff, format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
 
 #[derive(Parser)]
@@ -118,6 +118,10 @@ enum Commands {
         /// Case-insensitive search
         #[arg(short = 'i', long = "ignore-case")]
         ignore_case: bool,
+
+        /// Render Edit tool matches as unified diffs (old_string / new_string)
+        #[arg(short = 'd', long)]
+        diff: bool,
     },
 
     /// List sessions for a project
@@ -378,7 +382,7 @@ fn main() {
             pattern, user, assistant, bash_command, bash_output,
             tool_use, tool_result, subagent_prompt, compact_summary,
             project, session, context, before_context, after_context,
-            max_results, max_line_width, json, sessions_with_matches, ignore_case,
+            max_results, max_line_width, json, sessions_with_matches, ignore_case, diff,
         } => {
             let project_path = resolve_project(&project);
 
@@ -414,6 +418,7 @@ fn main() {
                 max_line_width,
                 json_output: json,
                 sessions_with_matches,
+                diff_mode: diff,
             };
 
             let all_sessions = filter_sessions_before(
@@ -476,7 +481,12 @@ fn main() {
                     let mut out = stdout.lock();
                     if !first { writeln!(out).unwrap(); }
                     first = false;
-                    writeln!(out, "{}", format_match(&m, &patterns, max_line_width)).unwrap();
+                    let rendered = if diff && m.edit_diff.is_some() {
+                        format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns)
+                    } else {
+                        format_match(&m, &patterns, max_line_width)
+                    };
+                    writeln!(out, "{}", rendered).unwrap();
                     out.flush().unwrap();
                 });
                 println!("{}", format_summary(total, &project_path, sessions.len()));

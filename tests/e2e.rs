@@ -216,6 +216,39 @@ impl SessionBuilder {
         self
     }
 
+    /// Write an Edit tool-use entry (file_path, old_string, new_string) + a
+    /// minimal tool-result so the tool-use map is properly populated.
+    fn edit(mut self, file_path: &str, old_string: &str, new_string: &str) -> Self {
+        self.tool_counter += 1;
+        let id = format!("toolu_{:04}", self.tool_counter);
+        let ts1 = self.next_ts();
+        let ts2 = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": id, "name": "Edit",
+                "input": {
+                    "file_path": file_path,
+                    "old_string": old_string,
+                    "new_string": new_string,
+                }
+            }]},
+            "timestamp": ts1,
+            "sessionId": sid,
+        }));
+        let id2 = id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": id2, "content": ""
+            }]},
+            "timestamp": ts2,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn compact_summary(mut self, text: &str) -> Self {
         let ts = self.next_ts();
         let sid = self.session_id.clone();
@@ -1419,4 +1452,173 @@ fn test_before_invalid_date_exits_nonzero() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("cannot parse date") || stderr.contains("error"),
         "should print an error about the bad date");
+}
+
+// ── --diff flag ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_diff_shows_unified_diff_for_edit_tool() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-basic");
+    proj.session("aaaa")
+        .edit("/src/main.rs", "fn old_name() {}\n", "fn new_name() {}\n")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "old_name", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("--- a/src/main.rs"), "should have --- header");
+    assert!(text.contains("+++ b/src/main.rs"), "should have +++ header");
+    assert!(text.contains("-fn old_name() {}"), "should show removed line");
+    assert!(text.contains("+fn new_name() {}"), "should show added line");
+}
+
+#[test]
+fn test_diff_hunk_header_present() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-hunk");
+    proj.session("bbbb")
+        .edit("/foo.rs", "line1\nline2\n", "line1\nchanged\n")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "line", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("@@"), "diff output should contain @@ hunk header");
+}
+
+#[test]
+fn test_diff_without_flag_shows_raw_format() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-raw");
+    proj.session("cccc")
+        .edit("/bar.rs", "old content\n", "new content\n")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "old_string", "--tool-use", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    // Without --diff, output should NOT contain unified diff markers
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("--- a/"), "without --diff should not show unified diff header");
+    assert!(!text.contains("+++ b/"), "without --diff should not show unified diff header");
+}
+
+#[test]
+fn test_diff_non_edit_tool_unaffected() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-non-edit");
+    proj.session("dddd")
+        .tool("Read", "file_path", "/some/file.rs", "file content here")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "file_path", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    // --diff on a non-Edit tool-use should still render normally (not a diff)
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("--- a/"), "non-Edit tool should not be rendered as diff");
+    assert!(text.contains("file_path"), "should still match the content");
+}
+
+#[test]
+fn test_diff_file_path_in_header() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-filepath");
+    proj.session("eeee")
+        .edit("/deep/nested/path/module.rs", "x = 1\n", "x = 2\n")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "x = ", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("/deep/nested/path/module.rs"),
+        "file path should appear in diff header");
+}
+
+#[test]
+fn test_diff_multiline_old_and_new_strings() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-multiline");
+    proj.session("ffff")
+        .edit(
+            "/lib.rs",
+            "fn alpha() {\n    let x = 1;\n    x\n}\n",
+            "fn alpha() {\n    let y = 2;\n    y\n}\n",
+        )
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "alpha", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let text = strip_ansi(stdout(&out));
+    // old lines prefixed with -
+    assert!(text.contains("-fn alpha() {"), "should show removed fn header");
+    assert!(text.contains("-    let x = 1;"), "should show removed body line");
+    // new lines prefixed with +
+    assert!(text.contains("+fn alpha() {"), "should show added fn header");
+    assert!(text.contains("+    let y = 2;"), "should show added body line");
+}
+
+#[test]
+fn test_diff_edit_tool_name_in_header() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-toolname");
+    proj.session("gggg")
+        .edit("/x.rs", "old\n", "new\n")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "old", "--tool-use", "--diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("tool: Edit"), "should show tool name in header");
+}
+
+#[test]
+fn test_diff_json_output_unaffected_by_diff_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("diff-json");
+    proj.session("hhhh")
+        .edit("/y.rs", "before\n", "after\n")
+        .done();
+
+    // --diff should not affect --json output (JSON is a separate code path)
+    let out = world
+        .cmd()
+        .args(["search", "before", "--tool-use", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let text = stdout(&out);
+    let parsed: serde_json::Value = serde_json::from_str(text)
+        .expect("--json should produce valid JSON regardless of content");
+    let arr = parsed.as_array().expect("expected JSON array");
+    assert!(!arr.is_empty(), "should have at least one match");
 }

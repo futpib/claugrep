@@ -30,12 +30,21 @@ impl Target {
     }
 }
 
+/// Diff data extracted from an Edit tool call.
+pub struct EditDiff {
+    pub file_path: String,
+    pub old_string: String,
+    pub new_string: String,
+}
+
 pub struct ExtractedContent {
     pub target: Target,
     pub text: String,
     pub tool_name: Option<String>,
     pub timestamp: String,
     pub session_id: String,
+    /// Populated for Edit tool calls; `None` for everything else.
+    pub edit_diff: Option<EditDiff>,
 }
 
 type ToolUseMap = HashMap<String, String>;
@@ -153,6 +162,7 @@ fn extract_user(
                 tool_name: None,
                 timestamp: timestamp.to_string(),
                 session_id: session_id.to_string(),
+                edit_diff: None,
             });
         } else if let Some(arr) = content.as_array() {
             for block in arr {
@@ -164,6 +174,7 @@ fn extract_user(
                             tool_name: None,
                             timestamp: timestamp.to_string(),
                             session_id: session_id.to_string(),
+                            edit_diff: None,
                         });
                     }
                 }
@@ -196,6 +207,7 @@ fn extract_user(
                     tool_name: Some(tool_name),
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
+                    edit_diff: None,
                 });
             }
         }
@@ -260,6 +272,7 @@ fn extract_assistant(
                     tool_name: None,
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
+                    edit_diff: None,
                 });
             }
         }
@@ -276,17 +289,35 @@ fn extract_assistant(
                         tool_name: Some("Bash".to_string()),
                         timestamp: timestamp.to_string(),
                         session_id: session_id.to_string(),
+                        edit_diff: None,
                     });
                 }
             }
 
             if targets.contains(&Target::ToolUse) && !name.is_empty() {
+                let edit_diff = if name == "Edit" {
+                    match (
+                        input["file_path"].as_str(),
+                        input["old_string"].as_str(),
+                        input["new_string"].as_str(),
+                    ) {
+                        (Some(fp), Some(old), Some(new)) => Some(EditDiff {
+                            file_path: fp.to_string(),
+                            old_string: old.to_string(),
+                            new_string: new.to_string(),
+                        }),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
                 out.push(ExtractedContent {
                     target: Target::ToolUse,
                     text: format_tool_input(input),
                     tool_name: Some(name),
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
+                    edit_diff,
                 });
             }
         }
@@ -403,5 +434,42 @@ mod tests {
         let contents = extract_content(f.path(), &user_only, "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::User);
+    }
+
+    #[test]
+    fn test_extract_edit_tool_populates_edit_diff() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"/src/lib.rs","old_string":"fn old() {}","new_string":"fn new() {}"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let edit = contents.iter().find(|c| c.target == Target::ToolUse && c.tool_name.as_deref() == Some("Edit"));
+        assert!(edit.is_some(), "should extract Edit tool-use");
+        let diff = edit.unwrap().edit_diff.as_ref().expect("edit_diff should be populated");
+        assert_eq!(diff.file_path, "/src/lib.rs");
+        assert_eq!(diff.old_string, "fn old() {}");
+        assert_eq!(diff.new_string, "fn new() {}");
+    }
+
+    #[test]
+    fn test_non_edit_tool_has_no_edit_diff() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file_path":"/foo.rs"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let read = contents.iter().find(|c| c.target == Target::ToolUse && c.tool_name.as_deref() == Some("Read"));
+        assert!(read.is_some());
+        assert!(read.unwrap().edit_diff.is_none(), "non-Edit tools should not have edit_diff");
+    }
+
+    #[test]
+    fn test_edit_tool_missing_fields_has_no_edit_diff() {
+        // Edit tool call missing new_string — should not panic, edit_diff should be None
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Edit","input":{"file_path":"/x.rs","old_string":"foo"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let edit = contents.iter().find(|c| c.tool_name.as_deref() == Some("Edit"));
+        assert!(edit.is_some());
+        assert!(edit.unwrap().edit_diff.is_none(), "incomplete Edit input should have no edit_diff");
     }
 }

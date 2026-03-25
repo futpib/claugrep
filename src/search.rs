@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use regex::Regex;
 
-use crate::parser::{extract_content, Target};
+use crate::parser::{extract_content, EditDiff, Target};
 use crate::sessions::SessionFile;
 
 pub struct MatchedLine {
@@ -19,6 +19,8 @@ pub struct SearchMatch {
     #[allow(dead_code)]
     pub text: String,
     pub matched_lines: Vec<MatchedLine>,
+    /// Set for Edit tool-use matches when diff data is available.
+    pub edit_diff: Option<EditDiff>,
 }
 
 pub struct SearchOptions {
@@ -33,6 +35,9 @@ pub struct SearchOptions {
     pub json_output: bool,
     #[allow(dead_code)]
     pub sessions_with_matches: bool,
+    /// Render Edit tool matches as unified diffs.
+    #[allow(dead_code)]
+    pub diff_mode: bool,
 }
 
 fn find_matches(
@@ -116,6 +121,7 @@ where
                     tool_name: content.tool_name,
                     text: content.text,
                     matched_lines,
+                    edit_diff: content.edit_diff,
                 });
             }
         }

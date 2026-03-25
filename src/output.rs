@@ -6,6 +6,8 @@ const RESET: &str = "\x1b[0m";
 const DIM: &str = "\x1b[2m";
 const CYAN: &str = "\x1b[36m";
 const BOLD_YELLOW: &str = "\x1b[1;33m";
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
 
 thread_local! {
     static DID_TRUNCATE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -67,6 +69,52 @@ fn highlight_matches(line: &str, patterns: &[Regex], max_width: usize) -> String
     for p in patterns {
         result = p.replace_all(&result, |caps: &regex::Captures| {
             format!("{}{}{}", BOLD_YELLOW, &caps[0], RESET)
+        }).to_string();
+    }
+    result
+}
+
+/// Render an Edit tool call as a unified diff block.
+pub fn format_diff(m: &SearchMatch, diff: &crate::parser::EditDiff, patterns: &[Regex]) -> String {
+    let short_session = &m.session_id[..m.session_id.len().min(8)];
+    let time = format_timestamp(&m.timestamp);
+    let header = format!("{}--- Match #{} | session={} | {} | tool-use ---{}",
+        CYAN, m.match_number, short_session, time, RESET);
+
+    let display_path = diff.file_path.trim_start_matches('/');
+    let mut lines = vec![header];
+    lines.push(format!("{}tool: Edit{}", DIM, RESET));
+    lines.push(format!("{}--- a/{}{}", RED, display_path, RESET));
+    lines.push(format!("{}+++ b/{}{}", GREEN, display_path, RESET));
+
+    let old_lines: Vec<&str> = diff.old_string.split('\n').collect();
+    let new_lines: Vec<&str> = diff.new_string.split('\n').collect();
+
+    lines.push(format!("{}@@ -{},{} +{},{} @@{}",
+        DIM,
+        1, old_lines.len(),
+        1, new_lines.len(),
+        RESET));
+
+    for line in &old_lines {
+        let highlighted = highlight_matches_colored(line, patterns, RED);
+        lines.push(format!("{}-{}{}", RED, highlighted, RESET));
+    }
+    for line in &new_lines {
+        let highlighted = highlight_matches_colored(line, patterns, GREEN);
+        lines.push(format!("{}+{}{}", GREEN, highlighted, RESET));
+    }
+
+    lines.join("\n")
+}
+
+/// Like `highlight_matches` but uses `base_color` instead of bold-yellow so
+/// the match highlight stays visible against colored diff lines.
+fn highlight_matches_colored(line: &str, patterns: &[Regex], base_color: &str) -> String {
+    let mut result = line.to_string();
+    for p in patterns {
+        result = p.replace_all(&result, |caps: &regex::Captures| {
+            format!("{}{}{}{}", BOLD_YELLOW, &caps[0], RESET, base_color)
         }).to_string();
     }
     result
@@ -195,5 +243,79 @@ mod tests {
         assert!(get_did_truncate());
         reset_truncation_state();
         assert!(!get_did_truncate());
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+        re.replace_all(s, "").to_string()
+    }
+
+    fn make_match(edit_diff: Option<crate::parser::EditDiff>) -> SearchMatch {
+        SearchMatch {
+            match_number: 1,
+            session_id: "test-session-id".to_string(),
+            timestamp: "2024-01-01T00:00:00Z".to_string(),
+            target: crate::parser::Target::ToolUse,
+            tool_name: Some("Edit".to_string()),
+            text: String::new(),
+            matched_lines: vec![],
+            edit_diff,
+        }
+    }
+
+    #[test]
+    fn test_format_diff_contains_headers() {
+        let diff = crate::parser::EditDiff {
+            file_path: "src/lib.rs".to_string(),
+            old_string: "fn old() {}".to_string(),
+            new_string: "fn new() {}".to_string(),
+        };
+        let m = make_match(Some(diff));
+        let pat = regex::Regex::new("old").unwrap();
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[pat]));
+        assert!(output.contains("--- a/src/lib.rs"), "should have --- header");
+        assert!(output.contains("+++ b/src/lib.rs"), "should have +++ header");
+        assert!(output.contains("-fn old() {}"), "should show removed line");
+        assert!(output.contains("+fn new() {}"), "should show added line");
+    }
+
+    #[test]
+    fn test_format_diff_hunk_header() {
+        let diff = crate::parser::EditDiff {
+            file_path: "x.rs".to_string(),
+            old_string: "a\nb\n".to_string(),
+            new_string: "a\nc\n".to_string(),
+        };
+        let m = make_match(Some(diff));
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[]));
+        assert!(output.contains("@@"), "should contain @@ hunk marker");
+    }
+
+    #[test]
+    fn test_format_diff_tool_name_in_header() {
+        let diff = crate::parser::EditDiff {
+            file_path: "y.rs".to_string(),
+            old_string: "old".to_string(),
+            new_string: "new".to_string(),
+        };
+        let m = make_match(Some(diff));
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[]));
+        assert!(output.contains("tool: Edit"), "should show tool name");
+    }
+
+    #[test]
+    fn test_format_diff_multiline() {
+        let diff = crate::parser::EditDiff {
+            file_path: "z.rs".to_string(),
+            old_string: "line1\nline2\nline3".to_string(),
+            new_string: "line1\nchanged\nline3".to_string(),
+        };
+        let m = make_match(Some(diff));
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[]));
+        assert!(output.contains("-line2"), "should show removed line2");
+        assert!(output.contains("+changed"), "should show added changed");
+        // line1 and line3 appear in both old and new (still shown as - and + since we do full replacement)
+        assert!(output.contains("-line1"), "should show old line1");
+        assert!(output.contains("+line1"), "should show new line1");
     }
 }
