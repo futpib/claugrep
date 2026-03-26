@@ -24,7 +24,7 @@ struct Cli {
     #[arg(long, global = true)]
     config_dir: Option<PathBuf>,
 
-    /// Filter to a specific claudex account
+    /// Filter to a specific account (claudex multi-account support)
     #[arg(long, global = true)]
     account: Option<String>,
 
@@ -119,9 +119,9 @@ enum Commands {
         #[arg(short = 'i', long = "ignore-case")]
         ignore_case: bool,
 
-        /// Render Edit tool matches as unified diffs (old_string / new_string)
-        #[arg(short = 'd', long)]
-        diff: bool,
+        /// Show raw key/value format for Edit tool matches instead of unified diff
+        #[arg(long = "no-diff")]
+        no_diff: bool,
     },
 
     /// List sessions for a project
@@ -382,7 +382,7 @@ fn main() {
             pattern, user, assistant, bash_command, bash_output,
             tool_use, tool_result, subagent_prompt, compact_summary,
             project, session, context, before_context, after_context,
-            max_results, max_line_width, json, sessions_with_matches, ignore_case, diff,
+            max_results, max_line_width, json, sessions_with_matches, ignore_case, no_diff,
         } => {
             let project_path = resolve_project(&project);
 
@@ -418,7 +418,7 @@ fn main() {
                 max_line_width,
                 json_output: json,
                 sessions_with_matches,
-                diff_mode: diff,
+                diff_mode: !no_diff,
             };
 
             let all_sessions = filter_sessions_before(
@@ -481,7 +481,7 @@ fn main() {
                     let mut out = stdout.lock();
                     if !first { writeln!(out).unwrap(); }
                     first = false;
-                    let rendered = if diff && m.edit_diff.is_some() {
+                    let rendered = if !no_diff && m.edit_diff.is_some() {
                         format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns)
                     } else {
                         format_match(&m, &patterns, max_line_width)

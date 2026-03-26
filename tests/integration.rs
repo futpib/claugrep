@@ -337,7 +337,7 @@ fn test_search_regex_pattern() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    // Regex: match "claugrep" or "claudex"
+    // Regex alternation: match "claugrep" or "claudex"
     let out = claugrep()
         .args(["search", "clau(grep|dex)", "--user", "--project", &home_project()])
         .output()

@@ -1454,7 +1454,7 @@ fn test_before_invalid_date_exits_nonzero() {
         "should print an error about the bad date");
 }
 
-// ── --diff flag ───────────────────────────────────────────────────────────────
+// ── Edit tool diff view (default) / --no-diff ─────────────────────────────────
 
 #[test]
 fn test_diff_shows_unified_diff_for_edit_tool() {
@@ -1464,9 +1464,10 @@ fn test_diff_shows_unified_diff_for_edit_tool() {
         .edit("/src/main.rs", "fn old_name() {}\n", "fn new_name() {}\n")
         .done();
 
+    // Diff is the default — no flag needed
     let out = world
         .cmd()
-        .args(["search", "old_name", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "old_name", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1488,7 +1489,7 @@ fn test_diff_hunk_header_present() {
 
     let out = world
         .cmd()
-        .args(["search", "line", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "line", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1497,7 +1498,7 @@ fn test_diff_hunk_header_present() {
 }
 
 #[test]
-fn test_diff_without_flag_shows_raw_format() {
+fn test_no_diff_flag_shows_raw_format() {
     let world = MockWorld::new();
     let proj = world.project("diff-raw");
     proj.session("cccc")
@@ -1506,14 +1507,15 @@ fn test_diff_without_flag_shows_raw_format() {
 
     let out = world
         .cmd()
-        .args(["search", "old_string", "--tool-use", "--project", proj.path()])
+        .args(["search", "old_string", "--tool-use", "--no-diff", "--project", proj.path()])
         .output()
         .unwrap();
 
-    // Without --diff, output should NOT contain unified diff markers
+    // With --no-diff, output should NOT contain unified diff markers
     let text = strip_ansi(stdout(&out));
-    assert!(!text.contains("--- a/"), "without --diff should not show unified diff header");
-    assert!(!text.contains("+++ b/"), "without --diff should not show unified diff header");
+    assert!(!text.contains("--- a/"), "--no-diff should not show unified diff header");
+    assert!(!text.contains("+++ b/"), "--no-diff should not show unified diff header");
+    assert!(text.contains("old_string"), "--no-diff should show raw key/value format");
 }
 
 #[test]
@@ -1526,11 +1528,11 @@ fn test_diff_non_edit_tool_unaffected() {
 
     let out = world
         .cmd()
-        .args(["search", "file_path", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "file_path", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
-    // --diff on a non-Edit tool-use should still render normally (not a diff)
+    // Non-Edit tool-use should still render normally (not as a diff)
     let text = strip_ansi(stdout(&out));
     assert!(!text.contains("--- a/"), "non-Edit tool should not be rendered as diff");
     assert!(text.contains("file_path"), "should still match the content");
@@ -1546,7 +1548,7 @@ fn test_diff_file_path_in_header() {
 
     let out = world
         .cmd()
-        .args(["search", "x = ", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "x = ", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1569,7 +1571,7 @@ fn test_diff_multiline_old_and_new_strings() {
 
     let out = world
         .cmd()
-        .args(["search", "alpha", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "alpha", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1592,7 +1594,7 @@ fn test_diff_edit_tool_name_in_header() {
 
     let out = world
         .cmd()
-        .args(["search", "old", "--tool-use", "--diff", "--project", proj.path()])
+        .args(["search", "old", "--tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1601,14 +1603,14 @@ fn test_diff_edit_tool_name_in_header() {
 }
 
 #[test]
-fn test_diff_json_output_unaffected_by_diff_flag() {
+fn test_diff_json_output_unaffected() {
     let world = MockWorld::new();
     let proj = world.project("diff-json");
     proj.session("hhhh")
         .edit("/y.rs", "before\n", "after\n")
         .done();
 
-    // --diff should not affect --json output (JSON is a separate code path)
+    // --json output is always raw matched lines, unaffected by diff behaviour
     let out = world
         .cmd()
         .args(["search", "before", "--tool-use", "--json", "--project", proj.path()])
@@ -1618,7 +1620,7 @@ fn test_diff_json_output_unaffected_by_diff_flag() {
     assert!(out.status.success());
     let text = stdout(&out);
     let parsed: serde_json::Value = serde_json::from_str(text)
-        .expect("--json should produce valid JSON regardless of content");
+        .expect("--json should produce valid JSON");
     let arr = parsed.as_array().expect("expected JSON array");
     assert!(!arr.is_empty(), "should have at least one match");
 }
