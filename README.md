@@ -69,7 +69,10 @@ Searches transcript content for `PATTERN`. The pattern is interpreted both as a 
 | `--max-line-width <n>` | 200 | Truncate long lines to this width (0 = unlimited) |
 | `-i, --ignore-case` | | Case-insensitive search |
 | `-l, --sessions-with-matches` | | Print only session file paths that contain matches (exits 1 if none) |
+| `--no-diff` | | For Edit tool matches, show raw key/value format instead of unified diff |
 | `--json` | | Output matches as JSON |
+
+**Edit tool diffs:** When `--tool-use` matches an Edit tool call, the result is rendered as a unified diff by default (old lines prefixed `-`, new lines `+`). Pass `--no-diff` to see the raw `file_path` / `old_string` / `new_string` key-value format instead.
 
 **Session offsets:** `--session 0` or `--session -1`, `--session -2` … select relative to the most recent session (0 = latest, -1 = previous, …). `--session 1`, `--session 2` … select from the oldest session forwards (1-based).
 
@@ -135,16 +138,6 @@ claugrep dump -1 --targets bash-command --project ~/code/my-project
 # Dump everything from session with UUID prefix abc123
 claugrep dump abc123 --targets user,assistant,bash-command,bash-output
 ```
-
-## Feature parity with claudex
-
-`claugrep` implements the same search functionality as the [`claudex memory search`](https://github.com/futpib/claudex) command, plus additional `sessions` and `dump` subcommands. Both tools:
-
-- Parse the same Claude Code JSONL transcript format
-- Support the same content-type filters and search flags
-- Apply both literal and regex interpretations of the search pattern
-- Deduplicate sessions across git worktrees
-- Emit a truncation hint to stderr when `--max-line-width` causes lines to be cut
 
 ## Development
 
