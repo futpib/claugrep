@@ -1576,11 +1576,12 @@ fn test_diff_multiline_old_and_new_strings() {
         .unwrap();
 
     let text = strip_ansi(stdout(&out));
-    // old lines prefixed with -
-    assert!(text.contains("-fn alpha() {"), "should show removed fn header");
+    // fn alpha() { is unchanged — appears as context (space prefix), not deleted/added
+    assert!(text.contains(" fn alpha() {"), "fn header should appear as context line");
+    assert!(!text.contains("-fn alpha() {"), "fn header should not appear as removed (it's equal)");
+    assert!(!text.contains("+fn alpha() {"), "fn header should not appear as added (it's equal)");
+    // changed body lines
     assert!(text.contains("-    let x = 1;"), "should show removed body line");
-    // new lines prefixed with +
-    assert!(text.contains("+fn alpha() {"), "should show added fn header");
     assert!(text.contains("+    let y = 2;"), "should show added body line");
 }
 

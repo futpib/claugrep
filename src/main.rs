@@ -409,6 +409,12 @@ fn main() {
             }
 
             let ctx = context.unwrap_or(0);
+            // Context lines within diffs default to 3 (standard unified diff); override via -C/-A/-B
+            let diff_ctx = context.or_else(|| {
+                let bc = before_context.unwrap_or(0);
+                let ac = after_context.unwrap_or(0);
+                if bc > 0 || ac > 0 { Some(bc.max(ac)) } else { None }
+            }).unwrap_or(3);
             let options = SearchOptions {
                 patterns: patterns.clone(),
                 targets,
@@ -482,7 +488,7 @@ fn main() {
                     if !first { writeln!(out).unwrap(); }
                     first = false;
                     let rendered = if !no_diff && m.edit_diff.is_some() {
-                        format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns)
+                        format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns, max_line_width, diff_ctx)
                     } else {
                         format_match(&m, &patterns, max_line_width)
                     };
