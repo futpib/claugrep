@@ -393,6 +393,34 @@ fn test_last_missing_project_exits_nonzero() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// no spurious warnings when subagents directory is absent (issue #19)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_no_warning_when_subagents_dir_absent() {
+    let world = MockWorld::new();
+    let proj = world.project("no-subagents");
+    // A plain session with no subagents directory.
+    proj.session("sess-ns")
+        .user_message("HELLO_NO_SUBAGENTS")
+        .done();
+
+    for subcommand in &[
+        vec!["last", "--project", proj.path()],
+        vec!["search", "HELLO_NO_SUBAGENTS", "--project", proj.path()],
+    ] {
+        let out = world.cmd().args(subcommand).output().unwrap();
+        assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !err.contains("warning"),
+            "subcommand {:?} should not print warnings when subagents dir is absent, got: {}",
+            subcommand, err
+        );
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // search — target flags
 // ═════════════════════════════════════════════════════════════════════════════
 

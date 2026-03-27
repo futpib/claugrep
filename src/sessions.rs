@@ -100,6 +100,7 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
     let subagent_dir = project_dir.join(session_id).join("subagents");
     let entries = match fs::read_dir(&subagent_dir) {
         Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
         Err(e) => {
             eprintln!("warning: failed to read directory {}: {}", subagent_dir.display(), e);
             return vec![];
