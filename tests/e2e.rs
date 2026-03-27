@@ -5,9 +5,9 @@
 //! Claude session data is required — every test is fully deterministic.
 
 use std::fs;
-use std::io::Write as IoWrite;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, Duration};
 
 extern crate filetime;
@@ -1043,6 +1043,58 @@ fn test_dump_no_session_defaults_to_latest() {
         "dump with no session arg should show the latest session");
     assert!(!text.contains("DUMP_DEFAULT_OLDER"),
         "dump with no session arg should not show older sessions");
+}
+
+#[test]
+fn test_dump_broken_pipe_does_not_segfault() {
+    // Reproduce: piping `claugrep dump` output to `head` causes a broken pipe.
+    // Rust's default SIGPIPE handling panics, which manifests as a segfault/abort
+    // instead of a clean exit. The process must exit without a signal.
+    let world = MockWorld::new();
+    let proj = world.project("dump-broken-pipe");
+    // Write enough content that claugrep won't finish before we close the pipe.
+    let mut s = proj.session("sess-bp");
+    for i in 0..50 {
+        s = s.user_message(&format!("BROKEN_PIPE_LINE_{}", i));
+    }
+    s.done();
+
+    let mut child = world.cmd()
+        .args(["dump", "--project", proj.path()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Read a few bytes then drop the pipe, simulating `head`.
+    {
+        let mut buf = [0u8; 64];
+        let stdout = child.stdout.as_mut().unwrap();
+        let _ = stdout.read(&mut buf);
+        // stdout is dropped here, closing the read end of the pipe.
+    }
+    drop(child.stdout.take());
+
+    let status = child.wait().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        // Must not have panicked (Rust panic = exit code 101).
+        assert_ne!(
+            status.code(),
+            Some(101),
+            "process panicked on broken pipe (exit 101); should handle EPIPE gracefully"
+        );
+        // Must not have crashed with segfault (11) or abort (6).
+        // Signal 13 (SIGPIPE) is acceptable — it means the kernel terminated the
+        // process cleanly when the pipe broke, which is the desired behaviour.
+        let sig = status.signal();
+        assert!(
+            sig.is_none() || sig == Some(13),
+            "process was killed by unexpected signal {:?}",
+            sig
+        );
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

@@ -359,6 +359,13 @@ fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<S
 }
 
 fn main() {
+    // Reset SIGPIPE to default so that writing to a closed pipe (e.g. `claugrep | head`)
+    // causes the kernel to kill the process cleanly instead of Rust's panic handler firing.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::try_parse().unwrap_or_else(|e| {
         e.print().expect("failed to write error");
         std::process::exit(e.exit_code());
