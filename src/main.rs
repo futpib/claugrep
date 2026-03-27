@@ -181,6 +181,25 @@ enum Commands {
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
     },
+
+    /// Show the last N records of a session (like tail)
+    Tail {
+        /// Number of records to show
+        #[arg(short = 'n', long = "lines", default_value = "10")]
+        count: usize,
+
+        /// Session ID prefix, offset (e.g. -1 for previous, 0 for latest), or "all" (default: 0)
+        #[arg(allow_hyphen_values = true, default_value = "0")]
+        session: String,
+
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
+        #[arg(short = 't', long, default_value = "default")]
+        targets: String,
+    },
 }
 
 fn default_targets() -> HashSet<Target> {
@@ -911,6 +930,50 @@ fn main() {
                     };
                     println!("{} {}", label, content.text);
                 }
+            }
+        }
+
+        Commands::Tail { count, session, project, targets } => {
+            let project_path = resolve_project(&project);
+            let target_set = parse_targets(&targets);
+
+            let all_sessions = filter_sessions_before(
+                filter_sessions_since(
+                    discover_sessions_across_configs(&project_path, &config_dirs),
+                    since,
+                ),
+                before,
+            );
+            let sessions = match resolve_session(Some(&session), &all_sessions) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if sessions.is_empty() {
+                eprintln!("No sessions found matching '{}'", session);
+                std::process::exit(1);
+            }
+
+            let mut all_contents = vec![];
+            for s in &sessions {
+                all_contents.extend(parser::extract_content(
+                    &s.file_path,
+                    &target_set,
+                    &s.session_id,
+                    s.is_subagent,
+                ));
+            }
+
+            let skip = all_contents.len().saturating_sub(count);
+            for content in all_contents.into_iter().skip(skip) {
+                let label = match &content.tool_name {
+                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
+                    None => format!("[{}]", content.target.as_str()),
+                };
+                println!("{} {}", label, content.text);
             }
         }
     }

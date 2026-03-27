@@ -2606,3 +2606,170 @@ fn test_last_prompt_not_in_default_not_warned() {
     assert!(!err.contains("warning: skipping unrecognized record"),
         "last-prompt records should not trigger unrecognized record warnings");
 }
+
+// ── tail tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn test_tail_shows_last_n_records() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-basic");
+    proj.session("sess-tail-1")
+        .user_message("TAIL_MSG_1")
+        .assistant_message("TAIL_MSG_2")
+        .user_message("TAIL_MSG_3")
+        .assistant_message("TAIL_MSG_4")
+        .user_message("TAIL_MSG_5")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "2", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("TAIL_MSG_3"), "should not contain earlier records");
+    assert!(text.contains("TAIL_MSG_4"), "should contain second-to-last record");
+    assert!(text.contains("TAIL_MSG_5"), "should contain last record");
+}
+
+#[test]
+fn test_tail_defaults_to_ten() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-default");
+    let mut builder = proj.session("sess-tail-def");
+    for i in 1..=15 {
+        builder = builder.user_message(&format!("TAIL_DEF_{}", i));
+    }
+    builder.done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    // Messages 1-5 should be excluded (15 - 10 = 5)
+    assert!(!text.contains("TAIL_DEF_5"), "should not contain 5th record");
+    assert!(text.contains("TAIL_DEF_6"), "should contain 6th record (first of last 10)");
+    assert!(text.contains("TAIL_DEF_15"), "should contain last record");
+}
+
+#[test]
+fn test_tail_more_than_available() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-over");
+    proj.session("sess-tail-over")
+        .user_message("TAIL_OVER_1")
+        .assistant_message("TAIL_OVER_2")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "100", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("TAIL_OVER_1"), "should contain all records");
+    assert!(text.contains("TAIL_OVER_2"), "should contain all records");
+}
+
+#[test]
+fn test_tail_with_targets() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-targets");
+    proj.session("sess-tail-tgt")
+        .user_message("TAIL_TGT_USER_1")
+        .assistant_message("TAIL_TGT_ASST_1")
+        .user_message("TAIL_TGT_USER_2")
+        .assistant_message("TAIL_TGT_ASST_2")
+        .user_message("TAIL_TGT_USER_3")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "2", "-t", "user", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    // Only user messages, last 2: USER_2, USER_3
+    assert!(!text.contains("TAIL_TGT_USER_1"), "should not contain earlier user records");
+    assert!(!text.contains("TAIL_TGT_ASST"), "should not contain assistant records");
+    assert!(text.contains("TAIL_TGT_USER_2"), "should contain second-to-last user record");
+    assert!(text.contains("TAIL_TGT_USER_3"), "should contain last user record");
+}
+
+#[test]
+fn test_tail_specific_session() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-session");
+    proj.session("sess-tail-s1")
+        .user_message("TAIL_SESS_S1_MSG")
+        .done();
+    proj.session("sess-tail-s2")
+        .user_message("TAIL_SESS_S2_MSG")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "sess-tail-s1", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("TAIL_SESS_S1_MSG"), "should contain specified session content");
+    assert!(!text.contains("TAIL_SESS_S2_MSG"), "should not contain other session content");
+}
+
+#[test]
+fn test_tail_defaults_to_latest_session() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-latest");
+    proj.session("sess-tail-old")
+        .user_message("TAIL_OLD_MSG")
+        .done();
+    proj.session("sess-tail-new")
+        .user_message("TAIL_NEW_MSG")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("TAIL_NEW_MSG"), "should show latest session");
+    assert!(!text.contains("TAIL_OLD_MSG"), "should not show older session");
+}
+
+#[test]
+fn test_tail_output_format_matches_dump() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-format");
+    proj.session("sess-tail-fmt")
+        .user_message("TAIL_FMT_MSG")
+        .bash("echo hello", "hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "100", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[user]"), "should have [user] label");
+    assert!(text.contains("[bash-command:Bash]"), "should have [bash-command:Bash] label");
+    assert!(text.contains("[bash-output:Bash]"), "should have [bash-output:Bash] label");
+}
