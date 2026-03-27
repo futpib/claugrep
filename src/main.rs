@@ -47,37 +47,9 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Search user messages
-        #[arg(short = 'u', long)]
-        user: bool,
-
-        /// Search assistant responses
-        #[arg(short = 'a', long)]
-        assistant: bool,
-
-        /// Search bash commands
-        #[arg(short = 'c', long = "bash-command")]
-        bash_command: bool,
-
-        /// Search bash output
-        #[arg(short = 'o', long = "bash-output")]
-        bash_output: bool,
-
-        /// Search tool use inputs
-        #[arg(short = 't', long = "tool-use")]
-        tool_use: bool,
-
-        /// Search tool results
-        #[arg(short = 'r', long = "tool-result")]
-        tool_result: bool,
-
-        /// Search subagent prompts
-        #[arg(short = 's', long = "subagent-prompt")]
-        subagent_prompt: bool,
-
-        /// Search compact/continuation summaries
-        #[arg(long = "compact-summary")]
-        compact_summary: bool,
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary; or "default" for all content types, "all" for everything including internals)
+        #[arg(short = 't', long, default_value = "default")]
+        targets: String,
 
         /// Project path (default: current directory)
         #[arg(long, default_value = ".")]
@@ -161,8 +133,8 @@ enum Commands {
         #[arg(long)]
         project: Option<PathBuf>,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary)
-        #[arg(long, default_value = "user,assistant")]
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary, or "all")
+        #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
         /// Max output line width (0 = unlimited)
@@ -191,20 +163,31 @@ enum Commands {
         #[arg(long, default_value = ".")]
         project: PathBuf,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary)
-        #[arg(long, default_value = "user,assistant")]
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary, or "all")
+        #[arg(short = 't', long, default_value = "default")]
         targets: String,
     },
 }
 
-fn all_targets() -> HashSet<Target> {
+fn default_targets() -> HashSet<Target> {
     [
         Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
         Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
     ].into_iter().collect()
 }
 
+fn all_targets() -> HashSet<Target> {
+    // For now same as default; will grow when internal types are added
+    default_targets()
+}
+
 fn parse_targets(s: &str) -> HashSet<Target> {
+    if s.trim() == "default" {
+        return default_targets();
+    }
+    if s.trim() == "all" {
+        return all_targets();
+    }
     s.split(',').filter_map(|t| match t.trim() {
         "user" => Some(Target::User),
         "assistant" => Some(Target::Assistant),
@@ -397,23 +380,13 @@ fn main() {
 
     match cli.command {
         Commands::Search {
-            pattern, user, assistant, bash_command, bash_output,
-            tool_use, tool_result, subagent_prompt, compact_summary,
+            pattern, targets: targets_str,
             project, session, context, before_context, after_context,
             max_results, max_line_width, json, sessions_with_matches, ignore_case, no_diff,
             fixed_strings, extended_regexp,
             all_projects, project_regexp,
         } => {
-            let mut targets: HashSet<Target> = HashSet::new();
-            if user { targets.insert(Target::User); }
-            if assistant { targets.insert(Target::Assistant); }
-            if bash_command { targets.insert(Target::BashCommand); }
-            if bash_output { targets.insert(Target::BashOutput); }
-            if tool_use { targets.insert(Target::ToolUse); }
-            if tool_result { targets.insert(Target::ToolResult); }
-            if subagent_prompt { targets.insert(Target::SubagentPrompt); }
-            if compact_summary { targets.insert(Target::CompactSummary); }
-            if targets.is_empty() { targets = all_targets(); }
+            let targets = parse_targets(&targets_str);
 
             let flags = if ignore_case { "(?i)" } else { "" };
             let escaped = regex::escape(&pattern);

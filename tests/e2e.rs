@@ -455,11 +455,11 @@ fn test_no_warning_when_subagents_dir_absent() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// search — target flags
+// search — target flags (--targets / -t)
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn test_search_assistant_flag() {
+fn test_search_targets_assistant() {
     let world = MockWorld::new();
     let proj = world.project("asst-flag");
     proj.session("sess-af")
@@ -467,26 +467,26 @@ fn test_search_assistant_flag() {
         .assistant_message("ASST_UNIQUE_TEXT_AF")
         .done();
 
-    // --assistant finds assistant text.
+    // --targets assistant finds assistant text.
     let found = world
         .cmd()
-        .args(["search", "ASST_UNIQUE_TEXT_AF", "--assistant", "--project", proj.path()])
+        .args(["search", "ASST_UNIQUE_TEXT_AF", "--targets", "assistant", "--project", proj.path()])
         .output()
         .unwrap();
     assert!(found.status.success());
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"));
 
-    // --user does NOT find it.
+    // --targets user does NOT find it.
     let miss = world
         .cmd()
-        .args(["search", "ASST_UNIQUE_TEXT_AF", "--user", "--project", proj.path()])
+        .args(["search", "ASST_UNIQUE_TEXT_AF", "--targets", "user", "--project", proj.path()])
         .output()
         .unwrap();
     assert!(strip_ansi(stdout(&miss)).contains("No matches found"));
 }
 
 #[test]
-fn test_search_bash_command_flag() {
+fn test_search_targets_bash_command() {
     let world = MockWorld::new();
     let proj = world.project("bash-cmd-flag");
     proj.session("sess-bc")
@@ -495,17 +495,17 @@ fn test_search_bash_command_flag() {
 
     let out = world
         .cmd()
-        .args(["search", "BASH_CMD_UNIQUE_XYZ", "--bash-command", "--project", proj.path()])
+        .args(["search", "BASH_CMD_UNIQUE_XYZ", "-t", "bash-command", "--project", proj.path()])
         .output()
         .unwrap();
 
     assert!(out.status.success());
     assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
-        "bash-command flag should find the command text");
+        "-t bash-command should find the command text");
 }
 
 #[test]
-fn test_search_bash_output_flag() {
+fn test_search_targets_bash_output() {
     let world = MockWorld::new();
     let proj = world.project("bash-out-flag");
     proj.session("sess-bo")
@@ -514,17 +514,17 @@ fn test_search_bash_output_flag() {
 
     let out = world
         .cmd()
-        .args(["search", "BASH_OUTPUT_UNIQUE_QRS", "--bash-output", "--project", proj.path()])
+        .args(["search", "BASH_OUTPUT_UNIQUE_QRS", "-t", "bash-output", "--project", proj.path()])
         .output()
         .unwrap();
 
     assert!(out.status.success());
     assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
-        "bash-output flag should find the command output");
+        "-t bash-output should find the command output");
 }
 
 #[test]
-fn test_search_tool_use_flag() {
+fn test_search_targets_tool_use() {
     let world = MockWorld::new();
     let proj = world.project("tool-use-flag");
     proj.session("sess-tu")
@@ -533,17 +533,17 @@ fn test_search_tool_use_flag() {
 
     let out = world
         .cmd()
-        .args(["search", "TOOL_USE_UNIQUE_PATH_ABC", "--tool-use", "--project", proj.path()])
+        .args(["search", "TOOL_USE_UNIQUE_PATH_ABC", "--targets", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
     assert!(out.status.success());
     assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
-        "tool-use flag should find the tool input");
+        "--targets tool-use should find the tool input");
 }
 
 #[test]
-fn test_search_tool_result_flag() {
+fn test_search_targets_tool_result() {
     let world = MockWorld::new();
     let proj = world.project("tool-result-flag");
     proj.session("sess-tr")
@@ -552,17 +552,17 @@ fn test_search_tool_result_flag() {
 
     let out = world
         .cmd()
-        .args(["search", "TOOL_RESULT_UNIQUE_DEF", "--tool-result", "--project", proj.path()])
+        .args(["search", "TOOL_RESULT_UNIQUE_DEF", "-t", "tool-result", "--project", proj.path()])
         .output()
         .unwrap();
 
     assert!(out.status.success());
     assert!(!strip_ansi(stdout(&out)).contains("No matches found"),
-        "tool-result flag should find the tool output");
+        "-t tool-result should find the tool output");
 }
 
 #[test]
-fn test_search_subagent_prompt_flag() {
+fn test_search_targets_subagent_prompt() {
     let world = MockWorld::new();
     let proj = world.project("subagent-flag");
     // Parent session (regular, so its messages are "user" type).
@@ -572,54 +572,145 @@ fn test_search_subagent_prompt_flag() {
         .user_message("SUBAGENT_UNIQUE_PROMPT_GHI")
         .done();
 
-    // --subagent-prompt finds the subagent's user message.
+    // -t subagent-prompt finds the subagent's user message.
     let found = world
         .cmd()
-        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "--subagent-prompt",
+        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "-t", "subagent-prompt",
                "--project", proj.path()])
         .output()
         .unwrap();
     assert!(found.status.success());
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
-        "subagent-prompt flag should find subagent messages");
+        "-t subagent-prompt should find subagent messages");
 
-    // --user does NOT find subagent messages.
+    // -t user does NOT find subagent messages.
     let miss = world
         .cmd()
-        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "--user", "--project", proj.path()])
+        .args(["search", "SUBAGENT_UNIQUE_PROMPT_GHI", "-t", "user", "--project", proj.path()])
         .output()
         .unwrap();
     assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
-        "--user should not match subagent prompts");
+        "-t user should not match subagent prompts");
 }
 
 #[test]
-fn test_search_compact_summary_flag() {
+fn test_search_targets_compact_summary() {
     let world = MockWorld::new();
     let proj = world.project("compact-flag");
     proj.session("sess-cs")
         .compact_summary("COMPACT_SUM_UNIQUE_JKL")
         .done();
 
-    // --compact-summary finds the summary.
+    // -t compact-summary finds the summary.
     let found = world
         .cmd()
-        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "--compact-summary",
+        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "-t", "compact-summary",
                "--project", proj.path()])
         .output()
         .unwrap();
     assert!(found.status.success());
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
-        "compact-summary flag should find summaries");
+        "-t compact-summary should find summaries");
 
-    // --user does NOT find compact summaries.
+    // -t user does NOT find compact summaries.
     let miss = world
         .cmd()
-        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "--user", "--project", proj.path()])
+        .args(["search", "COMPACT_SUM_UNIQUE_JKL", "-t", "user", "--project", proj.path()])
         .output()
         .unwrap();
     assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
-        "--user should not match compact summaries");
+        "-t user should not match compact summaries");
+}
+
+#[test]
+fn test_search_targets_all() {
+    let world = MockWorld::new();
+    let proj = world.project("targets-all");
+    proj.session("sess-all")
+        .user_message("USER_MSG_ALL_TEST")
+        .assistant_message("ASST_MSG_ALL_TEST")
+        .bash("BASH_CMD_ALL_TEST", "BASH_OUT_ALL_TEST")
+        .compact_summary("COMPACT_ALL_TEST")
+        .done();
+
+    // -t all finds everything
+    let out = world
+        .cmd()
+        .args(["search", "ALL_TEST", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("USER_MSG_ALL_TEST"), "-t all should find user messages");
+    assert!(text.contains("ASST_MSG_ALL_TEST"), "-t all should find assistant messages");
+    assert!(text.contains("BASH_CMD_ALL_TEST"), "-t all should find bash commands");
+    assert!(text.contains("BASH_OUT_ALL_TEST"), "-t all should find bash output");
+    assert!(text.contains("COMPACT_ALL_TEST"), "-t all should find compact summaries");
+}
+
+#[test]
+fn test_search_targets_comma_separated() {
+    let world = MockWorld::new();
+    let proj = world.project("targets-comma");
+    proj.session("sess-comma")
+        .user_message("USER_COMMA_TEST")
+        .assistant_message("ASST_COMMA_TEST")
+        .bash("BASH_CMD_COMMA_TEST", "BASH_OUT_COMMA_TEST")
+        .done();
+
+    // -t user,assistant finds both user and assistant but not bash
+    let out = world
+        .cmd()
+        .args(["search", "COMMA_TEST", "-t", "user,assistant", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("USER_COMMA_TEST"), "should find user messages");
+    assert!(text.contains("ASST_COMMA_TEST"), "should find assistant messages");
+    assert!(!text.contains("BASH_CMD_COMMA_TEST"), "should not find bash commands");
+}
+
+#[test]
+fn test_dump_targets_shorthand() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-t-short");
+    proj.session("sess-dt")
+        .user_message("USER_DUMP_T_SHORT")
+        .assistant_message("ASST_DUMP_T_SHORT")
+        .done();
+
+    // -t user only shows user
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "user", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("USER_DUMP_T_SHORT"), "-t user should show user messages");
+    assert!(!text.contains("ASST_DUMP_T_SHORT"), "-t user should not show assistant messages");
+}
+
+#[test]
+fn test_last_targets_shorthand() {
+    let world = MockWorld::new();
+    let proj = world.project("last-t-short");
+    proj.session("sess-lt")
+        .user_message("USER_LAST_T_SHORT")
+        .assistant_message("ASST_LAST_T_SHORT")
+        .done();
+
+    // -t assistant only shows assistant
+    let out = world
+        .cmd()
+        .args(["last", "-t", "assistant", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("ASST_LAST_T_SHORT"), "-t assistant should show assistant messages");
+    assert!(!text.contains("USER_LAST_T_SHORT"), "-t assistant should not show user messages");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -640,7 +731,7 @@ fn test_search_session_flag_scopes_to_one_session() {
     // Scoped to "aaaa" prefix: finds AAAA text, not BBBB.
     let out_aaaa = world
         .cmd()
-        .args(["search", "ONLY_IN_SESSION", "--user",
+        .args(["search", "ONLY_IN_SESSION", "-t", "user",
                "--session", "aaaa", "--project", proj.path()])
         .output()
         .unwrap();
@@ -663,12 +754,12 @@ fn test_search_before_context() {
 
     let no_ctx = world
         .cmd()
-        .args(["search", "TARGET_LINE_BCTX", "--user", "--project", proj.path()])
+        .args(["search", "TARGET_LINE_BCTX", "-t", "user", "--project", proj.path()])
         .output()
         .unwrap();
     let with_b = world
         .cmd()
-        .args(["search", "TARGET_LINE_BCTX", "--user", "-B", "1", "--project", proj.path()])
+        .args(["search", "TARGET_LINE_BCTX", "-t", "user", "-B", "1", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -690,12 +781,12 @@ fn test_search_after_context() {
 
     let no_ctx = world
         .cmd()
-        .args(["search", "TARGET_LINE_ACTX", "--user", "--project", proj.path()])
+        .args(["search", "TARGET_LINE_ACTX", "-t", "user", "--project", proj.path()])
         .output()
         .unwrap();
     let with_a = world
         .cmd()
-        .args(["search", "TARGET_LINE_ACTX", "--user", "-A", "1", "--project", proj.path()])
+        .args(["search", "TARGET_LINE_ACTX", "-t", "user", "-A", "1", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -722,7 +813,7 @@ fn test_search_max_line_width_unlimited() {
     // Default max_line_width=200: tail should be truncated away.
     let default_out = world
         .cmd()
-        .args(["search", "LINEWIDTH_SEARCH", "--user", "--project", proj.path()])
+        .args(["search", "LINEWIDTH_SEARCH", "-t", "user", "--project", proj.path()])
         .output()
         .unwrap();
     assert!(default_out.status.success());
@@ -733,7 +824,7 @@ fn test_search_max_line_width_unlimited() {
     // --max-line-width 0: full line visible.
     let unlimited_out = world
         .cmd()
-        .args(["search", "LINEWIDTH_SEARCH", "--user",
+        .args(["search", "LINEWIDTH_SEARCH", "-t", "user",
                "--max-line-width", "0", "--project", proj.path()])
         .output()
         .unwrap();
@@ -1857,7 +1948,7 @@ fn test_diff_shows_unified_diff_for_edit_tool() {
     // Diff is the default — no flag needed
     let out = world
         .cmd()
-        .args(["search", "old_name", "--tool-use", "--project", proj.path()])
+        .args(["search", "old_name", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1879,7 +1970,7 @@ fn test_diff_hunk_header_present() {
 
     let out = world
         .cmd()
-        .args(["search", "line", "--tool-use", "--project", proj.path()])
+        .args(["search", "line", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1897,7 +1988,7 @@ fn test_no_diff_flag_shows_raw_format() {
 
     let out = world
         .cmd()
-        .args(["search", "old_string", "--tool-use", "--no-diff", "--project", proj.path()])
+        .args(["search", "old_string", "-t", "tool-use", "--no-diff", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1918,7 +2009,7 @@ fn test_diff_non_edit_tool_unaffected() {
 
     let out = world
         .cmd()
-        .args(["search", "file_path", "--tool-use", "--project", proj.path()])
+        .args(["search", "file_path", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1938,7 +2029,7 @@ fn test_diff_file_path_in_header() {
 
     let out = world
         .cmd()
-        .args(["search", "x = ", "--tool-use", "--project", proj.path()])
+        .args(["search", "x = ", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1961,7 +2052,7 @@ fn test_diff_multiline_old_and_new_strings() {
 
     let out = world
         .cmd()
-        .args(["search", "alpha", "--tool-use", "--project", proj.path()])
+        .args(["search", "alpha", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -1985,7 +2076,7 @@ fn test_diff_edit_tool_name_in_header() {
 
     let out = world
         .cmd()
-        .args(["search", "old", "--tool-use", "--project", proj.path()])
+        .args(["search", "old", "-t", "tool-use", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -2004,7 +2095,7 @@ fn test_diff_json_output_unaffected() {
     // --json output is always raw matched lines, unaffected by diff behaviour
     let out = world
         .cmd()
-        .args(["search", "before", "--tool-use", "--json", "--project", proj.path()])
+        .args(["search", "before", "-t", "tool-use", "--json", "--project", proj.path()])
         .output()
         .unwrap();
 
