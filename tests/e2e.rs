@@ -904,7 +904,7 @@ fn test_projects_encoded_path_in_json() {
 }
 
 // =============================================================================
-// error handling — full help on incorrect invocations (issue #6)
+// error handling — incorrect invocations exit nonzero with clap's default output
 // =============================================================================
 
 fn stderr(out: &std::process::Output) -> &str {
@@ -912,20 +912,17 @@ fn stderr(out: &std::process::Output) -> &str {
 }
 
 #[test]
-fn test_unknown_subcommand_shows_full_help_and_exits_nonzero() {
+fn test_unknown_subcommand_exits_nonzero_with_error() {
     let world = MockWorld::new();
 
     let out = world.cmd().args(["foobar"]).output().unwrap();
 
     assert!(!out.status.success(), "unknown subcommand should exit nonzero");
     let err = strip_ansi(stderr(&out));
-    // Full help must list the available subcommands
-    assert!(err.contains("search"), "stderr should contain 'search' subcommand");
-    assert!(err.contains("last"), "stderr should contain 'last' subcommand");
-    assert!(err.contains("dump"), "stderr should contain 'dump' subcommand");
-    assert!(err.contains("projects"), "stderr should contain 'projects' subcommand");
-    // The specific error should also appear
     assert!(err.contains("foobar"), "stderr should mention the unrecognized subcommand");
+    // clap's default output should not repeat Usage/help section more than once
+    let usage_count = err.matches("Usage:").count();
+    assert!(usage_count <= 1, "Usage: should appear at most once, got {} times:\n{}", usage_count, err);
 }
 
 #[test]

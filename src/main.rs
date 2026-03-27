@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use std::io::Write;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use regex::Regex;
 use serde_json::json;
 
@@ -352,11 +352,6 @@ fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<S
 
 fn main() {
     let cli = Cli::try_parse().unwrap_or_else(|e| {
-        // Print full help to stderr so the user sees all available subcommands
-        // and correct usage alongside the specific error message.
-        let mut cmd = Cli::command();
-        let _ = cmd.write_long_help(&mut std::io::stderr());
-        eprintln!();
         e.print().expect("failed to write error");
         std::process::exit(e.exit_code());
     });
