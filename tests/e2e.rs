@@ -943,6 +943,61 @@ fn test_search_missing_required_arg_shows_usage_and_exits_nonzero() {
 }
 
 // =============================================================================
+// truncate_line — multibyte character boundary safety
+// =============================================================================
+
+#[test]
+fn test_search_truncation_does_not_panic_on_multibyte_boundary() {
+    // Reproduce: byte index falls inside a multi-byte char (e.g. em dash U+2014,
+    // encoded as 3 bytes 0xE2 0x80 0x94) when truncating around a match.
+    // Build a line where the match keyword sits at ~byte 95 and an em-dash
+    // straddles the computed start/end boundary at max_line_width=100.
+    let world = MockWorld::new();
+    let proj = world.project("multibyte-trunc");
+
+    // Construct a line where the computed `start` offset lands inside an em dash
+    // (U+2014, 3 UTF-8 bytes: 0xE2 0x80 0x94).
+    //
+    // With --max-line-width 100:
+    //   match_start = 100 (KEYWORD starts at byte 100)
+    //   match_len   = 7
+    //   budget      = 100 - 7 = 93
+    //   before      = 93 / 2 = 46
+    //   start       = 100 - 46 = 54
+    //
+    // If byte 54 is the second byte of a 3-byte em dash the slice panics.
+    // Place em dash at bytes 53..56 (i.e. 53 ASCII chars then '—').
+    let prefix_ascii = "x".repeat(53); // bytes 0..53
+    // em dash occupies bytes 53, 54, 55
+    // then enough ASCII to reach byte 100 for KEYWORD: 100 - 56 = 44 chars
+    let filler = "y".repeat(44);
+    let suffix = " rest of the line goes on and on and on and on and on";
+    let msg = format!("{}—{}KEYWORD{}", prefix_ascii, filler, suffix);
+
+    proj.session("sess-mb")
+        .user_message(&msg)
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "search", "KEYWORD",
+            "--project", proj.path(),
+            "--max-line-width", "100",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "should not panic; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("KEYWORD"), "output should contain the match");
+}
+
+// =============================================================================
 // claudex account and --config-dir tests
 // =============================================================================
 

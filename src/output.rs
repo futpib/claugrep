@@ -47,14 +47,23 @@ fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, b
         let before = budget / 2;
         let after = budget - before;
 
-        let start = match_start.saturating_sub(before);
-        let end = (match_start + match_len + after).min(line.len());
+        let start = {
+            let s = match_start.saturating_sub(before);
+            // Walk back to the nearest char boundary
+            (0..=s).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0)
+        };
+        let end = {
+            let e = (match_start + match_len + after).min(line.len());
+            // Walk forward to the nearest char boundary
+            (e..=line.len()).find(|&i| line.is_char_boundary(i)).unwrap_or(line.len())
+        };
 
         let prefix = if start > 0 { "..." } else { "" };
         let suffix = if end < line.len() { "..." } else { "" };
         (format!("{}{}{}", prefix, &line[start..end], suffix), true)
     } else {
-        (format!("{}...", &line[..max_width]), true)
+        let end = (0..=max_width).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+        (format!("{}...", &line[..end]), true)
     }
 }
 
