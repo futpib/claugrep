@@ -611,6 +611,9 @@ fn main() {
                         remaining = remaining.saturating_sub(count);
                     }
                     println!("{}", format_multi_summary(total_matches, projects_with_results, filtered_projects.len(), total_sessions_searched));
+                    if total_matches == max_results {
+                        eprintln!("Hint: Result limit reached. Use --max-results to increase the limit.");
+                    }
                     if get_did_truncate() {
                         eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
                     }
@@ -688,6 +691,9 @@ fn main() {
                         out.flush().unwrap();
                     });
                     println!("{}", format_summary(total, &project_path, sessions.len()));
+                    if total == max_results {
+                        eprintln!("Hint: Result limit reached. Use --max-results to increase the limit.");
+                    }
                     if get_did_truncate() {
                         eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
                     }

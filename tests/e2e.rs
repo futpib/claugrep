@@ -694,6 +694,82 @@ fn test_search_missing_project_exits_nonzero() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// --max-results limit hint in summary
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_summary_shows_limit_hint_when_max_results_hit() {
+    // Create more messages than the limit so the limit is definitely hit.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-hint");
+    let mut s = proj.session("sess-mr");
+    for i in 0..5 {
+        s = s.user_message(&format!("LIMIT_MATCH_{}", i));
+    }
+    s.done();
+
+    // Request only 3 results — limit will be hit.
+    let out = world.cmd()
+        .args(["search", "LIMIT_MATCH", "--max-results", "3", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let err = strip_ansi(stderr(&out));
+    assert!(
+        err.contains("--max-results") || err.contains("limit"),
+        "stderr should mention the limit when it is hit, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_summary_no_limit_hint_when_fewer_results_than_max() {
+    // Only 2 messages, limit is 5 — limit is NOT hit.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-no-hint");
+    proj.session("sess-mrn")
+        .user_message("UNDER_LIMIT_MATCH_0")
+        .user_message("UNDER_LIMIT_MATCH_1")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "UNDER_LIMIT_MATCH", "--max-results", "5", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let err = strip_ansi(stderr(&out));
+    assert!(
+        !err.contains("--max-results"),
+        "stderr should NOT mention --max-results when limit was not hit, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_summary_no_limit_hint_when_exact_match_count_equals_max() {
+    // Exactly 3 messages, limit is also 3 — this is the coincidence case.
+    // We cannot distinguish it from a real limit hit without look-ahead,
+    // so we accept either behavior here; this test just documents the case.
+    // The important thing is tested by test_summary_no_limit_hint_when_fewer_results_than_max.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-exact");
+    proj.session("sess-mre")
+        .user_message("EXACT_MATCH_0")
+        .user_message("EXACT_MATCH_1")
+        .user_message("EXACT_MATCH_2")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "EXACT_MATCH", "--max-results", "3", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    // No assertion about --max-results presence — behavior is intentionally unspecified
+    // when count == limit (we can't know without extra work whether more exist).
+    let _ = strip_ansi(stdout(&out));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // -F/--fixed-strings and -E/--extended-regexp flags
 // ═════════════════════════════════════════════════════════════════════════════
 

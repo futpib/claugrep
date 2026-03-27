@@ -282,7 +282,7 @@ pub fn format_multi_summary(total_matches: usize, projects_with_results: usize, 
         let match_line = style(format!(
             "{} match{} found.",
             total_matches,
-            if total_matches == 1 { "" } else { "es" }
+            if total_matches == 1 { "" } else { "es" },
         )).dim().to_string();
         format!("\n{}\n{}", proj_info, match_line)
     }
@@ -302,7 +302,7 @@ pub fn format_summary(count: usize, project_path: &str, session_count: usize) ->
         let match_line = style(format!(
             "{} match{} found.",
             count,
-            if count == 1 { "" } else { "es" }
+            if count == 1 { "" } else { "es" },
         )).dim().to_string();
         format!("\n{}\n{}", project_info, match_line)
     }
