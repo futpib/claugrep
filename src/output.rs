@@ -36,34 +36,34 @@ fn first_match_pos(line: &str, patterns: &[Regex]) -> Option<(usize, usize)> {
 }
 
 fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, bool) {
-    if max_width == 0 || line.len() <= max_width {
+    let char_count = line.chars().count();
+    if max_width == 0 || char_count <= max_width {
         return (line.to_string(), false);
     }
 
     DID_TRUNCATE.with(|f| f.set(true));
 
-    if let Some((match_start, match_len)) = first_match_pos(line, patterns) {
-        let budget = max_width.saturating_sub(match_len);
+    // Convert a char count from the start of `line` to a byte offset.
+    let chars_to_byte = |n: usize| -> usize {
+        line.char_indices().nth(n).map(|(i, _)| i).unwrap_or(line.len())
+    };
+
+    if let Some((match_start_byte, match_len_byte)) = first_match_pos(line, patterns) {
+        let match_start_char = line[..match_start_byte].chars().count();
+        let match_len_char = line[match_start_byte..match_start_byte + match_len_byte].chars().count();
+
+        let budget = max_width.saturating_sub(match_len_char);
         let before = budget / 2;
         let after = budget - before;
 
-        let start = {
-            let s = match_start.saturating_sub(before);
-            // Walk back to the nearest char boundary
-            (0..=s).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0)
-        };
-        let end = {
-            let e = (match_start + match_len + after).min(line.len());
-            // Walk forward to the nearest char boundary
-            (e..=line.len()).find(|&i| line.is_char_boundary(i)).unwrap_or(line.len())
-        };
+        let start_char = match_start_char.saturating_sub(before);
+        let end_char = (match_start_char + match_len_char + after).min(char_count);
 
-        let prefix = if start > 0 { "..." } else { "" };
-        let suffix = if end < line.len() { "..." } else { "" };
-        (format!("{}{}{}", prefix, &line[start..end], suffix), true)
+        let prefix = if start_char > 0 { "..." } else { "" };
+        let suffix = if end_char < char_count { "..." } else { "" };
+        (format!("{}{}{}", prefix, &line[chars_to_byte(start_char)..chars_to_byte(end_char)], suffix), true)
     } else {
-        let end = (0..=max_width).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
-        (format!("{}...", &line[..end]), true)
+        (format!("{}...", &line[..chars_to_byte(max_width)]), true)
     }
 }
 
@@ -378,6 +378,25 @@ mod tests {
         assert!(was_truncated);
         assert!(result.contains("MATCH"));
         assert!(result.len() <= 50 + 6); // budget + "..." prefixes
+    }
+
+    #[test]
+    fn test_truncate_line_by_char_count_not_bytes() {
+        // Each '🔍' is 4 bytes. A line of 40 emoji (160 bytes) with max_width=20:
+        // - correct (char-based):  truncate at 20 chars  → result has 20 emoji + "..."
+        // - buggy (byte-based):    truncate at 20 bytes  → result has  5 emoji + "..."
+        //
+        // No match pattern so we hit the simple `&line[..max_width]` path directly.
+        let line = "🔍".repeat(40);
+        let pat = regex::Regex::new("NOMATCH").unwrap();
+        let (result, was_truncated) = truncate_line(&line, &[pat], 20);
+        assert!(was_truncated);
+        let emoji_count = result.chars().filter(|&c| c == '🔍').count();
+        assert_eq!(
+            emoji_count, 20,
+            "with max_width=20 chars, result should contain exactly 20 emoji, got {}; result: {:?}",
+            emoji_count, result
+        );
     }
 
     #[test]
