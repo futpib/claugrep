@@ -16,6 +16,7 @@ pub enum Target {
     System,
     FileHistorySnapshot,
     QueueOperation,
+    LastPrompt,
 }
 
 impl Target {
@@ -32,6 +33,7 @@ impl Target {
             Target::System => "system",
             Target::FileHistorySnapshot => "file-history-snapshot",
             Target::QueueOperation => "queue-operation",
+            Target::LastPrompt => "last-prompt",
         }
     }
 }
@@ -183,6 +185,19 @@ fn extract_from_entry(
                     target: Target::QueueOperation,
                     text: text.to_string(),
                     tool_name: Some(operation.to_string()),
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
+            }
+        }
+        Some("last-prompt") => {
+            if targets.contains(&Target::LastPrompt) {
+                let text = entry["lastPrompt"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::LastPrompt,
+                    text: text.to_string(),
+                    tool_name: None,
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
@@ -408,6 +423,7 @@ mod tests {
             Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
+            Target::LastPrompt,
         ].into_iter().collect()
     }
 

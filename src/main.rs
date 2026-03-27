@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use std::io::Write;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use serde_json::json;
 
@@ -16,6 +16,16 @@ use crate::sessions::{discover_sessions, discover_all_sessions, discover_project
 use crate::search::{search_sessions, SearchOptions};
 use crate::output::{format_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ColorWhen {
+    /// Colorize output only when writing to a terminal
+    Auto,
+    /// Always colorize output
+    Always,
+    /// Never colorize output
+    Never,
+}
 
 #[derive(Parser)]
 #[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
@@ -27,6 +37,10 @@ struct Cli {
     /// Filter to a specific account (claudex multi-account support)
     #[arg(long, global = true)]
     account: Option<String>,
+
+    /// When to use colors: auto, always, never (also respects NO_COLOR env var)
+    #[arg(long, global = true, default_value = "auto", value_name = "WHEN")]
+    color: ColorWhen,
 
     /// Only show sessions modified after the given date (git-compatible: yesterday, '2 days ago', '2026-03-24', Monday, 'last week')
     #[arg(long = "after", alias = "since", global = true)]
@@ -47,7 +61,7 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation; or "default" for standard types, "all" for everything including internals)
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
@@ -133,7 +147,7 @@ enum Commands {
         #[arg(long)]
         project: Option<PathBuf>,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary, or "all")
+        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
@@ -163,7 +177,7 @@ enum Commands {
         #[arg(long, default_value = ".")]
         project: PathBuf,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary, or "all")
+        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
     },
@@ -181,6 +195,7 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::System);
     t.insert(Target::FileHistorySnapshot);
     t.insert(Target::QueueOperation);
+    t.insert(Target::LastPrompt);
     t
 }
 
@@ -203,6 +218,7 @@ fn parse_targets(s: &str) -> HashSet<Target> {
         "system" => Some(Target::System),
         "file-history-snapshot" => Some(Target::FileHistorySnapshot),
         "queue-operation" => Some(Target::QueueOperation),
+        "last-prompt" => Some(Target::LastPrompt),
         other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
     }).collect()
 }
@@ -359,6 +375,19 @@ fn main() {
         e.print().expect("failed to write error");
         std::process::exit(e.exit_code());
     });
+
+    // Configure color output (console crate already respects NO_COLOR, CLICOLOR, CLICOLOR_FORCE)
+    match cli.color {
+        ColorWhen::Always => {
+            console::set_colors_enabled(true);
+            console::set_colors_enabled_stderr(true);
+        }
+        ColorWhen::Never => {
+            console::set_colors_enabled(false);
+            console::set_colors_enabled_stderr(false);
+        }
+        ColorWhen::Auto => {}
+    }
 
     let config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
 

@@ -321,6 +321,17 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a last-prompt record.
+    fn last_prompt(mut self, text: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "last-prompt",
+            "lastPrompt": text,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -2499,4 +2510,99 @@ fn test_queue_operation_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "queue-operation records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// last-prompt target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_last_prompt() {
+    let world = MockWorld::new();
+    let proj = world.project("lp-search");
+    proj.session("sess-lp")
+        .user_message("hello")
+        .assistant_message("hi")
+        .last_prompt("UNIQUE_LAST_PROMPT_XYZ")
+        .done();
+
+    // -t last-prompt finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_LAST_PROMPT_XYZ", "-t", "last-prompt", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t last-prompt should find last-prompt records");
+
+    // default targets should NOT find last-prompt records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_LAST_PROMPT_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "last-prompt records should not appear in default targets");
+}
+
+#[test]
+fn test_search_last_prompt_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("lp-all");
+    proj.session("sess-lpa")
+        .user_message("hello")
+        .last_prompt("UNIQUE_LP_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_LP_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include last-prompt records");
+}
+
+#[test]
+fn test_dump_last_prompt() {
+    let world = MockWorld::new();
+    let proj = world.project("lp-dump");
+    proj.session("sess-lpd")
+        .user_message("hello user")
+        .last_prompt("the last prompt text")
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "last-prompt", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("the last prompt text"), "dump should show last prompt text");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_last_prompt_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("lp-nowarn");
+    proj.session("sess-lpw")
+        .user_message("hello")
+        .last_prompt("some prompt")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "last-prompt records should not trigger unrecognized record warnings");
 }
