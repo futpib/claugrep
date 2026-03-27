@@ -13,6 +13,7 @@ pub enum Target {
     ToolResult,
     SubagentPrompt,
     CompactSummary,
+    System,
 }
 
 impl Target {
@@ -26,6 +27,7 @@ impl Target {
             Target::ToolResult => "tool-result",
             Target::SubagentPrompt => "subagent-prompt",
             Target::CompactSummary => "compact-summary",
+            Target::System => "system",
         }
     }
 }
@@ -128,6 +130,20 @@ fn extract_from_entry(
                     "sessionId": entry_session,
                 });
                 extract_from_entry(&synth, tool_use_map, targets, session_id, is_subagent, out);
+            }
+        }
+        Some("system") => {
+            if targets.contains(&Target::System) {
+                let subtype = entry["subtype"].as_str().unwrap_or("unknown");
+                let text = entry["content"].as_str().unwrap_or(subtype);
+                out.push(ExtractedContent {
+                    target: Target::System,
+                    text: text.to_string(),
+                    tool_name: Some(subtype.to_string()),
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
             }
         }
         _ => {
@@ -348,6 +364,7 @@ mod tests {
         [
             Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
+            Target::System,
         ].into_iter().collect()
     }
 
@@ -420,7 +437,7 @@ mod tests {
     #[test]
     fn test_warns_on_unrecognized_record_type() {
         let f = write_jsonl(&[
-            r#"{"type":"system","content":"you are a helpful assistant","timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+            r#"{"type":"totally_unknown","content":"something","timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
             r#"{"type":"user","message":{"content":"hello"},"timestamp":"2024-01-01T00:00:01Z","sessionId":"s"}"#,
         ]);
         // Capture stderr by reading after the fact — we just check it doesn't panic

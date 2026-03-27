@@ -177,8 +177,9 @@ fn default_targets() -> HashSet<Target> {
 }
 
 fn all_targets() -> HashSet<Target> {
-    // For now same as default; will grow when internal types are added
-    default_targets()
+    let mut t = default_targets();
+    t.insert(Target::System);
+    t
 }
 
 fn parse_targets(s: &str) -> HashSet<Target> {
@@ -197,6 +198,7 @@ fn parse_targets(s: &str) -> HashSet<Target> {
         "tool-result" => Some(Target::ToolResult),
         "subagent-prompt" => Some(Target::SubagentPrompt),
         "compact-summary" => Some(Target::CompactSummary),
+        "system" => Some(Target::System),
         other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
     }).collect()
 }

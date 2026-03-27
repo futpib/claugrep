@@ -262,6 +262,23 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a system record with a subtype and optional content.
+    fn system_record(mut self, subtype: &str, content: Option<&str>) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        let mut v = serde_json::json!({
+            "type": "system",
+            "subtype": subtype,
+            "timestamp": ts,
+            "sessionId": sid,
+        });
+        if let Some(c) = content {
+            v["content"] = serde_json::json!(c);
+        }
+        self.write(v);
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -401,10 +418,10 @@ fn test_warning_printed_for_unrecognized_record_type() {
     let world = MockWorld::new();
     let proj = world.project("unrecognized-record");
 
-    // Write a raw session file with a "system" record followed by a user message.
+    // Write a raw session file with a truly unknown record type followed by a user message.
     let session_path = proj.session_dir.join("sess-ur.jsonl");
     let mut f = fs::File::create(&session_path).unwrap();
-    writeln!(f, r#"{{"type":"system","content":"you are helpful","timestamp":"2024-01-01T00:00:00Z","sessionId":"sess-ur"}}"#).unwrap();
+    writeln!(f, r#"{{"type":"totally_unknown","content":"something","timestamp":"2024-01-01T00:00:00Z","sessionId":"sess-ur"}}"#).unwrap();
     writeln!(f, r#"{{"type":"user","message":{{"content":"hello"}},"timestamp":"2024-01-01T00:00:01Z","sessionId":"sess-ur"}}"#).unwrap();
 
     let out = world.cmd()
@@ -420,7 +437,7 @@ fn test_warning_printed_for_unrecognized_record_type() {
     );
     // The record preview (first 120 chars) should appear in the warning.
     assert!(
-        err.contains("system"),
+        err.contains("totally_unknown"),
         "warning should include a preview of the record, got: {}",
         err
     );
@@ -2105,4 +2122,104 @@ fn test_diff_json_output_unaffected() {
         .expect("--json should produce valid JSON");
     let arr = parsed.as_array().expect("expected JSON array");
     assert!(!arr.is_empty(), "should have at least one match");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// system records (#21)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_system_record_with_content() {
+    let world = MockWorld::new();
+    let proj = world.project("sys-content");
+    proj.session("sess-sc")
+        .user_message("hello")
+        .system_record("compact_boundary", Some("Conversation compacted UNIQUE_COMPACT_XYZ"))
+        .done();
+
+    // -t system finds the content
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_COMPACT_XYZ", "-t", "system", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t system should find system records by content");
+
+    // default targets should NOT find system records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_COMPACT_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "system records should not appear in default targets");
+}
+
+#[test]
+fn test_search_system_record_without_content() {
+    let world = MockWorld::new();
+    let proj = world.project("sys-nocontent");
+    proj.session("sess-sn")
+        .user_message("hello")
+        .system_record("turn_duration", None)
+        .done();
+
+    // -t system finds records without content (by matching the subtype)
+    let found = world
+        .cmd()
+        .args(["search", "turn_duration", "-t", "system", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t system should find system records by subtype when no content");
+}
+
+#[test]
+fn test_dump_system_record() {
+    let world = MockWorld::new();
+    let proj = world.project("sys-dump");
+    proj.session("sess-sd")
+        .user_message("hello user")
+        .system_record("compact_boundary", Some("Conversation compacted"))
+        .system_record("turn_duration", None)
+        .assistant_message("hello assistant")
+        .done();
+
+    // -t system shows system records
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "system", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("compact_boundary"), "dump should show subtype");
+    assert!(text.contains("Conversation compacted"), "dump should show content");
+    assert!(text.contains("turn_duration"), "dump should show subtype for content-less records");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_system_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("sys-nowarn");
+    proj.session("sess-sw")
+        .user_message("hello")
+        .system_record("stop_hook_summary", None)
+        .done();
+
+    // default dump should not warn about system records
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "system records should not trigger unrecognized record warnings");
 }
