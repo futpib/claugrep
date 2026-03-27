@@ -403,12 +403,11 @@ fn main() {
             let escaped = regex::escape(&pattern);
             let literal_pat = Regex::new(&format!("{}{}", flags, escaped))
                 .expect("invalid pattern");
-            let mut patterns = vec![literal_pat.clone()];
-            if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
-                if regex_pat.as_str() != literal_pat.as_str() {
-                    patterns.push(regex_pat);
-                }
-            }
+            let patterns = if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
+                vec![regex_pat]
+            } else {
+                vec![literal_pat]
+            };
 
             let ctx = context.unwrap_or(0);
             // Context lines within diffs default to 3 (standard unified diff); override via -C/-A/-B

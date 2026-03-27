@@ -69,13 +69,27 @@ fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, b
 
 fn highlight_matches(line: &str, patterns: &[Regex], max_width: usize) -> String {
     let (truncated, _) = truncate_line(line, patterns, max_width);
-    let mut result = truncated;
-    for p in patterns {
-        result = p.replace_all(&result, |caps: &regex::Captures| {
-            style(&caps[0]).bold().yellow().to_string()
-        }).to_string();
+    let s = &truncated;
+
+    // Collect all match spans from all patterns in a single pass over the original
+    // string, then render in one shot.  Applying patterns sequentially with
+    // replace_all is incorrect: the second pattern can match inside the ANSI escape
+    // codes emitted by the first, producing cascading garbage.
+    let mut spans: Vec<(usize, usize)> = patterns.iter()
+        .flat_map(|p| p.find_iter(s).map(|m| (m.start(), m.end())))
+        .collect();
+    spans.sort_unstable_by_key(|&(start, _)| start);
+
+    let mut out = String::with_capacity(s.len());
+    let mut pos = 0;
+    for (start, end) in spans {
+        if start < pos { continue; } // overlapping span — skip
+        out.push_str(&s[pos..start]);
+        out.push_str(&style(&s[start..end]).bold().yellow().to_string());
+        pos = end;
     }
-    result
+    out.push_str(&s[pos..]);
+    out
 }
 
 /// Color a diff line's content: match spans in bold yellow, non-match spans in base color
@@ -306,6 +320,37 @@ mod tests {
     #[test]
     fn test_format_timestamp_empty() {
         assert_eq!(format_timestamp(""), "unknown");
+    }
+
+    #[test]
+    fn test_highlight_dot_regex_does_not_cascade_into_ansi_codes() {
+        // Reproduce: when "." is the search pattern it is a valid regex matching every
+        // character.  The old sequential replace_all approach applied the literal "\."
+        // pattern first (wrapping the dot in ANSI codes), then applied the "." pattern
+        // which matched the newly-inserted ESC bytes too, producing cascading garbage
+        // (72 ANSI sequences for an 11-char string).
+        //
+        // The fix: collect all match spans first, then render in one pass so that
+        // already-emitted ANSI codes are never re-matched.
+        console::set_colors_enabled(true);
+        let pat = regex::Regex::new(r".").unwrap(); // matches every char
+        let line = "hello.world"; // 11 chars
+
+        let result = highlight_matches(line, &[pat], 0);
+
+        // Every character is a match, so we expect exactly 11 highlighted spans.
+        // Each span = 3 ANSI sequences (open-bold, open-yellow, reset) = 33 total.
+        // The old cascading bug produced 72 (it re-matched ESC bytes inside prior codes).
+        let ansi_count = result.matches("\x1b[").count();
+        assert_eq!(
+            ansi_count, 33,
+            "expected exactly 33 ANSI sequences (11 spans × 3), got {}; output: {:?}",
+            ansi_count, result
+        );
+        // Sanity: the plain text content is preserved
+        let plain = strip_ansi(&result);
+        assert_eq!(plain, "hello.world");
+        console::set_colors_enabled(false);
     }
 
     #[test]

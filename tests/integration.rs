@@ -260,7 +260,7 @@ fn test_search_case_insensitive() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out_sensitive = claugrep()
+    let _out_sensitive = claugrep()
         .args(["search", "CLAUGREP", "--user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
