@@ -83,6 +83,11 @@ impl MockProject {
         &self.project_path
     }
 
+    /// Return the path where a session file would be stored.
+    fn session_path(&self, id: &str) -> PathBuf {
+        self.session_dir.join(format!("{}.jsonl", id))
+    }
+
     /// Create a normal (non-subagent) session file.
     fn session(&self, id: &str) -> SessionBuilder {
         let path = self.session_dir.join(format!("{}.jsonl", id));
@@ -2424,14 +2429,14 @@ fn test_search_queue_operation_with_content() {
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
         "-t queue-operation should find enqueued messages by content");
 
-    // default targets should NOT find queue-operation records
-    let miss = world
+    // default targets should also find queue-operation records
+    let hit = world
         .cmd()
         .args(["search", "UNIQUE_QUEUED_MSG", "--project", proj.path()])
         .output()
         .unwrap();
-    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
-        "queue-operation records should not appear in default targets");
+    assert!(!strip_ansi(stdout(&hit)).contains("No matches found"),
+        "queue-operation records should appear in default targets");
 }
 
 #[test]
@@ -2831,4 +2836,103 @@ fn test_tail_sorts_by_timestamp_across_subagents() {
     assert!(text.contains("TAIL_SORT_MAIN_LATE_2"), "should contain main late 2 at t=101");
     assert!(!text.contains("TAIL_SORT_MAIN_EARLY"), "should not contain early main records");
     assert!(!text.contains("TAIL_SORT_SUB_1"), "should not contain subagent record at t=50");
+}
+
+// ── tail -f tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_tail_follow_picks_up_new_records() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-follow");
+    proj.session("sess-tail-f")
+        .user_message("TAIL_F_INITIAL")
+        .done();
+
+    // Start `claugrep tail -f -n 1` as a child process
+    let mut child = world
+        .cmd()
+        .args(["tail", "-f", "-n", "1", "sess-tail-f", "--project", proj.path()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Give it time to start and print the initial tail
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Append a new record to the session file
+    let session_path = proj.session_path("sess-tail-f");
+    {
+        use std::fs::OpenOptions;
+        let mut f = OpenOptions::new().append(true).open(&session_path).unwrap();
+        let record = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "TAIL_F_APPENDED"},
+            "timestamp": "2024-01-01T01:00:00Z",
+            "sessionId": "sess-tail-f",
+        });
+        writeln!(f, "{}", record).unwrap();
+    }
+
+    // Wait for the follow loop to pick it up
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Kill the process and read output
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    let text = strip_ansi(std::str::from_utf8(&output.stdout).unwrap());
+
+    assert!(text.contains("TAIL_F_INITIAL"), "should contain initial record");
+    assert!(text.contains("TAIL_F_APPENDED"), "should contain appended record");
+}
+
+#[test]
+fn test_tail_follow_respects_targets() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-follow-tgt");
+    proj.session("sess-tail-ft")
+        .user_message("TAIL_FT_INIT")
+        .done();
+
+    // Follow only assistant messages
+    let mut child = world
+        .cmd()
+        .args(["tail", "-f", "-n", "0", "-t", "assistant", "sess-tail-ft", "--project", proj.path()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Append a user record (should be filtered) and an assistant record (should appear)
+    let session_path = proj.session_path("sess-tail-ft");
+    {
+        use std::fs::OpenOptions;
+        let mut f = OpenOptions::new().append(true).open(&session_path).unwrap();
+        let user_rec = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "TAIL_FT_USER_HIDDEN"},
+            "timestamp": "2024-01-01T01:00:00Z",
+            "sessionId": "sess-tail-ft",
+        });
+        writeln!(f, "{}", user_rec).unwrap();
+        let asst_rec = serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "TAIL_FT_ASST_VISIBLE"}]},
+            "timestamp": "2024-01-01T01:00:01Z",
+            "sessionId": "sess-tail-ft",
+        });
+        writeln!(f, "{}", asst_rec).unwrap();
+    }
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    child.kill().unwrap();
+    let output = child.wait_with_output().unwrap();
+    let text = strip_ansi(std::str::from_utf8(&output.stdout).unwrap());
+
+    assert!(!text.contains("TAIL_FT_USER_HIDDEN"), "should not contain user record");
+    assert!(!text.contains("TAIL_FT_INIT"), "should not contain initial record (n=0)");
+    assert!(text.contains("TAIL_FT_ASST_VISIBLE"), "should contain appended assistant record");
 }

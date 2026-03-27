@@ -55,9 +55,9 @@ pub struct ExtractedContent {
     pub edit_diff: Option<EditDiff>,
 }
 
-type ToolUseMap = HashMap<String, String>;
+pub type ToolUseMap = HashMap<String, String>;
 
-fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
+pub fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
     let content = match entry["type"].as_str() {
         Some("assistant") => &entry["message"]["content"],
         Some("progress") => &entry["data"]["message"]["message"]["content"],
@@ -110,7 +110,7 @@ pub fn extract_content(
     results
 }
 
-fn extract_from_entry(
+pub fn extract_from_entry(
     entry: &serde_json::Value,
     tool_use_map: &ToolUseMap,
     targets: &std::collections::HashSet<Target>,

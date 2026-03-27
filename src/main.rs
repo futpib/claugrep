@@ -188,6 +188,10 @@ enum Commands {
         #[arg(short = 'n', long = "lines", default_value = "10")]
         count: usize,
 
+        /// Follow the session file for new records (like tail -f)
+        #[arg(short = 'f', long)]
+        follow: bool,
+
         /// Session ID prefix, offset (e.g. -1 for previous, 0 for latest), or "all" (default: 0)
         #[arg(allow_hyphen_values = true, default_value = "0")]
         session: String,
@@ -206,6 +210,7 @@ fn default_targets() -> HashSet<Target> {
     [
         Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
         Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
+        Target::QueueOperation,
     ].into_iter().collect()
 }
 
@@ -213,7 +218,6 @@ fn all_targets() -> HashSet<Target> {
     let mut t = default_targets();
     t.insert(Target::System);
     t.insert(Target::FileHistorySnapshot);
-    t.insert(Target::QueueOperation);
     t.insert(Target::LastPrompt);
     t
 }
@@ -933,7 +937,7 @@ fn main() {
             }
         }
 
-        Commands::Tail { count, session, project, targets } => {
+        Commands::Tail { count, follow, session, project, targets } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -957,6 +961,14 @@ fn main() {
                 std::process::exit(1);
             }
 
+            let print_content = |content: &parser::ExtractedContent| {
+                let label = match &content.tool_name {
+                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
+                    None => format!("[{}]", content.target.as_str()),
+                };
+                println!("{} {}", label, content.text);
+            };
+
             let mut all_contents = vec![];
             for s in &sessions {
                 all_contents.extend(parser::extract_content(
@@ -971,11 +983,84 @@ fn main() {
 
             let skip = all_contents.len().saturating_sub(count);
             for content in all_contents.into_iter().skip(skip) {
-                let label = match &content.tool_name {
-                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
-                    None => format!("[{}]", content.target.as_str()),
+                print_content(&content);
+            }
+
+            if follow {
+                use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+                // Follow only the main (non-subagent) session file
+                let main_session = match sessions.iter().find(|s| !s.is_subagent) {
+                    Some(s) => s,
+                    None => {
+                        eprintln!("No main session file to follow");
+                        std::process::exit(1);
+                    }
                 };
-                println!("{} {}", label, content.text);
+
+                let mut file = match std::fs::File::open(&main_session.file_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("error: failed to open {}: {}", main_session.file_path.display(), e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Seek to end — we already printed the initial tail
+                file.seek(SeekFrom::End(0)).unwrap();
+
+                let mut tool_use_map = parser::ToolUseMap::new();
+                let mut reader = BufReader::new(file);
+                let mut line_buf = String::new();
+
+                loop {
+                    line_buf.clear();
+                    match reader.read_line(&mut line_buf) {
+                        Ok(0) => {
+                            // EOF — sleep and retry
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            continue;
+                        }
+                        Ok(_) => {
+                            let line = line_buf.trim_end();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            match serde_json::from_str::<serde_json::Value>(line) {
+                                Ok(entry) => {
+                                    parser::collect_tool_use_ids(&entry, &mut tool_use_map);
+                                    let mut results = vec![];
+                                    parser::extract_from_entry(
+                                        &entry,
+                                        &tool_use_map,
+                                        &target_set,
+                                        &main_session.session_id,
+                                        main_session.is_subagent,
+                                        &mut results,
+                                    );
+                                    for content in &results {
+                                        print_content(content);
+                                    }
+                                    let _ = std::io::stdout().flush();
+                                }
+                                Err(_) => {
+                                    // Incomplete line (file still being written),
+                                    // put it back by seeking backward
+                                    let n = line_buf.len() as i64;
+                                    let inner = reader.get_mut();
+                                    let _ = inner.seek(SeekFrom::Current(-n));
+                                    // Clear the BufReader's internal buffer so it
+                                    // re-reads from the seeked position
+                                    reader = BufReader::new(reader.into_inner());
+                                    std::thread::sleep(std::time::Duration::from_millis(200));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
+                    }
+                }
             }
         }
     }
