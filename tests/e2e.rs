@@ -2751,6 +2751,12 @@ fn test_tail_defaults_to_latest_session() {
         .user_message("TAIL_NEW_MSG")
         .done();
 
+    // Ensure distinct mtimes so "latest" is deterministic
+    let old_path = proj.session_path("sess-tail-old");
+    let new_path = proj.session_path("sess-tail-new");
+    set_mtime(&old_path, SystemTime::UNIX_EPOCH + Duration::from_secs(1000));
+    set_mtime(&new_path, SystemTime::UNIX_EPOCH + Duration::from_secs(2000));
+
     let out = world
         .cmd()
         .args(["tail", "--project", proj.path()])
