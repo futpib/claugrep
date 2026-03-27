@@ -393,6 +393,40 @@ fn test_last_missing_project_exits_nonzero() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// warning on unrecognized record types
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_warning_printed_for_unrecognized_record_type() {
+    let world = MockWorld::new();
+    let proj = world.project("unrecognized-record");
+
+    // Write a raw session file with a "system" record followed by a user message.
+    let session_path = proj.session_dir.join("sess-ur.jsonl");
+    let mut f = fs::File::create(&session_path).unwrap();
+    writeln!(f, r#"{{"type":"system","content":"you are helpful","timestamp":"2024-01-01T00:00:00Z","sessionId":"sess-ur"}}"#).unwrap();
+    writeln!(f, r#"{{"type":"user","message":{{"content":"hello"}},"timestamp":"2024-01-01T00:00:01Z","sessionId":"sess-ur"}}"#).unwrap();
+
+    let out = world.cmd()
+        .args(["search", "hello", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("warning") && err.contains("skipping"),
+        "stderr should warn about the unrecognized record, got: {}",
+        err
+    );
+    // The record preview (first 120 chars) should appear in the warning.
+    assert!(
+        err.contains("system"),
+        "warning should include a preview of the record, got: {}",
+        err
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // no spurious warnings when subagents directory is absent (issue #19)
 // ═════════════════════════════════════════════════════════════════════════════
 

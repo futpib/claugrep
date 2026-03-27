@@ -130,7 +130,12 @@ fn extract_from_entry(
                 extract_from_entry(&synth, tool_use_map, targets, session_id, is_subagent, out);
             }
         }
-        _ => {}
+        _ => {
+            let raw = entry.to_string();
+            let preview: String = raw.chars().take(120).collect();
+            let ellipsis = if raw.chars().count() > 120 { "..." } else { "" };
+            eprintln!("warning: skipping unrecognized record: {}{}", preview, ellipsis);
+        }
     }
 }
 
@@ -410,6 +415,20 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", true); // is_subagent=true
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::SubagentPrompt);
+    }
+
+    #[test]
+    fn test_warns_on_unrecognized_record_type() {
+        let f = write_jsonl(&[
+            r#"{"type":"system","content":"you are a helpful assistant","timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+            r#"{"type":"user","message":{"content":"hello"},"timestamp":"2024-01-01T00:00:01Z","sessionId":"s"}"#,
+        ]);
+        // Capture stderr by reading after the fact — we just check it doesn't panic
+        // and that the user message is still extracted.
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        assert_eq!(contents.len(), 1);
+        assert_eq!(contents[0].target, Target::User);
+        // (The warning goes to stderr; tested at e2e level for the actual message text)
     }
 
     #[test]
