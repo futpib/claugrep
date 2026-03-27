@@ -694,6 +694,127 @@ fn test_search_missing_project_exits_nonzero() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// -F/--fixed-strings and -E/--extended-regexp flags
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_fixed_strings_matches_literal_dot() {
+    // "a.b" as a regex matches "axb", but with -F it must only match the literal "a.b".
+    let world = MockWorld::new();
+    let proj = world.project("fixed-strings");
+    proj.session("sess-fs")
+        .user_message("literal a.b here")
+        .user_message("should not match axb")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "a.b", "-F", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("literal a.b here"), "-F should match literal dot");
+    assert!(!text.contains("should not match axb"), "-F should not match regex wildcard");
+}
+
+#[test]
+fn test_search_fixed_strings_long_flag() {
+    // Same as above but using --fixed-strings instead of -F.
+    let world = MockWorld::new();
+    let proj = world.project("fixed-strings-long");
+    proj.session("sess-fsl")
+        .user_message("literal a.b here")
+        .user_message("should not match axb")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "a.b", "--fixed-strings", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("literal a.b here"), "--fixed-strings should match literal dot");
+    assert!(!text.contains("should not match axb"), "--fixed-strings should not match regex wildcard");
+}
+
+#[test]
+fn test_search_extended_regexp_matches_regex_not_literal() {
+    // "a.b" as -E is pure regex: matches "axb" but also "a.b".
+    // Without -E the default also matches both, so this test verifies
+    // that -E does NOT suppress regex matching (it still works as regex).
+    let world = MockWorld::new();
+    let proj = world.project("extended-regexp");
+    proj.session("sess-er")
+        .user_message("regex match axb here")
+        .user_message("also literal a.b here")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "a.b", "-E", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("regex match axb here"), "-E should match via regex wildcard");
+    assert!(text.contains("also literal a.b here"), "-E should also match literal dot");
+}
+
+#[test]
+fn test_search_extended_regexp_long_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("extended-regexp-long");
+    proj.session("sess-erl")
+        .user_message("regex match axb here")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "a.b", "--extended-regexp", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("regex match axb here"), "--extended-regexp should match via regex");
+}
+
+#[test]
+fn test_search_fixed_strings_does_not_match_regex_special_chars() {
+    // With -F, "^hello" is a literal string not an anchor.
+    let world = MockWorld::new();
+    let proj = world.project("fixed-special");
+    proj.session("sess-fsp")
+        .user_message("prefix ^hello suffix")   // contains literal "^hello"
+        .user_message("hello at start")          // would match regex ^hello
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "^hello", "-F", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("prefix ^hello suffix"), "-F should match literal ^hello");
+    assert!(!text.contains("hello at start"), "-F should not treat ^ as regex anchor");
+}
+
+#[test]
+fn test_search_extended_regexp_only_uses_regex_no_literal_fallback() {
+    // With -E, an invalid regex should fail rather than fall back to literal matching.
+    // "[unclosed" is an invalid regex — without -E the literal fallback finds it;
+    // with -E there is no fallback so it should exit nonzero with an error.
+    let world = MockWorld::new();
+    let proj = world.project("extended-no-fallback");
+    proj.session("sess-enf")
+        .user_message("contains [unclosed bracket")
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "[unclosed", "-E", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(!out.status.success(), "-E with invalid regex should exit nonzero");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // dump subcommand
 // ═════════════════════════════════════════════════════════════════════════════
 

@@ -123,6 +123,14 @@ enum Commands {
         #[arg(long = "no-diff")]
         no_diff: bool,
 
+        /// Treat pattern as a fixed string (no regex interpretation)
+        #[arg(short = 'F', long = "fixed-strings")]
+        fixed_strings: bool,
+
+        /// Treat pattern as an extended regular expression (no literal fallback)
+        #[arg(short = 'E', long = "extended-regexp")]
+        extended_regexp: bool,
+
         /// Search all projects under ~/.claude/projects/ (ignores --project path)
         #[arg(long = "all-projects")]
         all_projects: bool,
@@ -386,6 +394,7 @@ fn main() {
             tool_use, tool_result, subagent_prompt, compact_summary,
             project, session, context, before_context, after_context,
             max_results, max_line_width, json, sessions_with_matches, ignore_case, no_diff,
+            fixed_strings, extended_regexp,
             all_projects, project_regexp,
         } => {
             let mut targets: HashSet<Target> = HashSet::new();
@@ -401,12 +410,25 @@ fn main() {
 
             let flags = if ignore_case { "(?i)" } else { "" };
             let escaped = regex::escape(&pattern);
-            let literal_pat = Regex::new(&format!("{}{}", flags, escaped))
-                .expect("invalid pattern");
-            let patterns = if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
-                vec![regex_pat]
+            let patterns = if fixed_strings {
+                vec![Regex::new(&format!("{}{}", flags, escaped)).expect("invalid pattern")]
+            } else if extended_regexp {
+                match Regex::new(&format!("{}{}", flags, pattern)) {
+                    Ok(r) => vec![r],
+                    Err(e) => {
+                        eprintln!("error: invalid regex '{}': {}", pattern, e);
+                        std::process::exit(2);
+                    }
+                }
             } else {
-                vec![literal_pat]
+                // Default: try as regex, fall back to literal
+                let literal_pat = Regex::new(&format!("{}{}", flags, escaped))
+                    .expect("invalid pattern");
+                if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
+                    vec![regex_pat]
+                } else {
+                    vec![literal_pat]
+                }
             };
 
             let ctx = context.unwrap_or(0);
