@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions};
-use crate::output::{format_diff, format_match, format_summary, reset_truncation_state, get_did_truncate, format_record};
+use crate::output::{format_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
 
 #[derive(Parser)]
@@ -122,6 +122,14 @@ enum Commands {
         /// Show raw key/value format for Edit tool matches instead of unified diff
         #[arg(long = "no-diff")]
         no_diff: bool,
+
+        /// Search all projects under ~/.claude/projects/ (ignores --project path)
+        #[arg(long = "all-projects")]
+        all_projects: bool,
+
+        /// Search only projects whose path matches REGEXP, can be repeated (ignores --project path)
+        #[arg(short = 'P', long = "project-regexp", value_name = "REGEXP")]
+        project_regexp: Vec<String>,
     },
 
     /// List sessions for a project
@@ -383,9 +391,8 @@ fn main() {
             tool_use, tool_result, subagent_prompt, compact_summary,
             project, session, context, before_context, after_context,
             max_results, max_line_width, json, sessions_with_matches, ignore_case, no_diff,
+            all_projects, project_regexp,
         } => {
-            let project_path = resolve_project(&project);
-
             let mut targets: HashSet<Target> = HashSet::new();
             if user { targets.insert(Target::User); }
             if assistant { targets.insert(Target::Assistant); }
@@ -427,77 +434,246 @@ fn main() {
                 diff_mode: !no_diff,
             };
 
-            let all_sessions = filter_sessions_before(
-                filter_sessions_since(
-                    discover_sessions_across_configs(&project_path, &config_dirs),
-                    since,
-                ),
-                before,
-            );
+            let is_multi_project = all_projects || !project_regexp.is_empty();
 
-            if all_sessions.is_empty() {
-                eprintln!("No session files found for project {}", project_path);
-                std::process::exit(1);
-            }
+            if is_multi_project {
+                // Compile project regexps
+                let proj_regexps: Vec<Regex> = {
+                    let mut result = vec![];
+                    for p in &project_regexp {
+                        match Regex::new(&format!("{}{}", flags, p)) {
+                            Ok(r) => result.push(r),
+                            Err(e) => {
+                                eprintln!("error: invalid project regexp '{}': {}", p, e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    result
+                };
 
-            let sessions = match resolve_session(session.as_deref(), &all_sessions) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{}", e);
+                let all_project_infos = discover_projects(&config_dirs);
+                let filtered_projects: Vec<_> = all_project_infos.iter()
+                    .filter(|p| {
+                        if proj_regexps.is_empty() {
+                            true
+                        } else {
+                            proj_regexps.iter().any(|r| r.is_match(&p.decoded_path))
+                        }
+                    })
+                    .collect();
+
+                if filtered_projects.is_empty() {
+                    eprintln!("No projects matched the given filters");
                     std::process::exit(1);
                 }
-            };
-            let stdout = std::io::stdout();
 
-            if sessions_with_matches {
-                let mut seen = std::collections::HashSet::new();
-                let total = search_sessions(&sessions, &options, |m| {
-                    let path = sessions.iter()
-                        .find(|s| s.session_id == m.session_id)
-                        .map(|s| s.file_path.to_string_lossy().to_string())
-                        .unwrap_or_else(|| m.session_id.clone());
-                    if seen.insert(path.clone()) {
-                        let mut out = stdout.lock();
-                        writeln!(out, "{}", path).unwrap();
-                    }
-                });
-                if total == 0 { std::process::exit(1); }
-            } else if json {
-                // JSON must be a single valid array, so collect then print.
-                let mut output: Vec<serde_json::Value> = vec![];
-                search_sessions(&sessions, &options, |m| {
-                    output.push(json!({
-                        "matchNumber": m.match_number,
-                        "sessionId": m.session_id,
-                        "timestamp": m.timestamp,
-                        "target": m.target.as_str(),
-                        "toolName": m.tool_name,
-                        "matchedLines": m.matched_lines.iter().map(|ml| json!({
-                            "lineNumber": ml.line_number,
-                            "line": ml.line,
-                            "isMatch": ml.is_match,
-                        })).collect::<Vec<_>>(),
-                    }));
-                });
-                println!("{}", serde_json::to_string_pretty(&output).unwrap());
-            } else {
+                let stdout = std::io::stdout();
+                let mut total_matches = 0usize;
+                let mut total_sessions_searched = 0usize;
+                let mut projects_with_results = 0usize;
+                let mut first_project_output = true;
+                let mut remaining = max_results;
+
                 reset_truncation_state();
-                let mut first = true;
-                let total = search_sessions(&sessions, &options, |m| {
-                    let mut out = stdout.lock();
-                    if !first { writeln!(out).unwrap(); }
-                    first = false;
-                    let rendered = if !no_diff && m.edit_diff.is_some() {
-                        format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns, max_line_width, diff_ctx)
-                    } else {
-                        format_match(&m, &patterns, max_line_width)
-                    };
-                    writeln!(out, "{}", rendered).unwrap();
-                    out.flush().unwrap();
-                });
-                println!("{}", format_summary(total, &project_path, sessions.len()));
-                if get_did_truncate() {
-                    eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
+
+                if json {
+                    let mut all_output: Vec<serde_json::Value> = vec![];
+                    for proj in &filtered_projects {
+                        if remaining == 0 { break; }
+                        let pp = &proj.decoded_path;
+                        let proj_sessions = filter_sessions_before(
+                            filter_sessions_since(
+                                discover_sessions_across_configs(pp, &config_dirs),
+                                since,
+                            ),
+                            before,
+                        );
+                        if proj_sessions.is_empty() { continue; }
+                        let sessions = match resolve_session(session.as_deref(), &proj_sessions) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
+                        let count = search_sessions(&sessions, &proj_options, |m| {
+                            all_output.push(json!({
+                                "projectPath": pp,
+                                "matchNumber": m.match_number,
+                                "sessionId": m.session_id,
+                                "timestamp": m.timestamp,
+                                "target": m.target.as_str(),
+                                "toolName": m.tool_name,
+                                "matchedLines": m.matched_lines.iter().map(|ml| json!({
+                                    "lineNumber": ml.line_number,
+                                    "line": ml.line,
+                                    "isMatch": ml.is_match,
+                                })).collect::<Vec<_>>(),
+                            }));
+                        });
+                        remaining = remaining.saturating_sub(count);
+                    }
+                    println!("{}", serde_json::to_string_pretty(&all_output).unwrap());
+                } else if sessions_with_matches {
+                    let mut seen = std::collections::HashSet::new();
+                    for proj in &filtered_projects {
+                        if remaining == 0 { break; }
+                        let pp = &proj.decoded_path;
+                        let proj_sessions = filter_sessions_before(
+                            filter_sessions_since(
+                                discover_sessions_across_configs(pp, &config_dirs),
+                                since,
+                            ),
+                            before,
+                        );
+                        if proj_sessions.is_empty() { continue; }
+                        let sessions = match resolve_session(session.as_deref(), &proj_sessions) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
+                        let count = search_sessions(&sessions, &proj_options, |m| {
+                            let path = sessions.iter()
+                                .find(|s| s.session_id == m.session_id)
+                                .map(|s| s.file_path.to_string_lossy().to_string())
+                                .unwrap_or_else(|| m.session_id.clone());
+                            if seen.insert(path.clone()) {
+                                let mut out = stdout.lock();
+                                writeln!(out, "{}", path).unwrap();
+                            }
+                        });
+                        total_matches += count;
+                        remaining = remaining.saturating_sub(count);
+                    }
+                    if total_matches == 0 { std::process::exit(1); }
+                } else {
+                    for proj in &filtered_projects {
+                        if remaining == 0 { break; }
+                        let pp = &proj.decoded_path;
+                        let proj_sessions = filter_sessions_before(
+                            filter_sessions_since(
+                                discover_sessions_across_configs(pp, &config_dirs),
+                                since,
+                            ),
+                            before,
+                        );
+                        if proj_sessions.is_empty() { continue; }
+                        let sessions = match resolve_session(session.as_deref(), &proj_sessions) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        total_sessions_searched += sessions.len();
+
+                        // Buffer per-project results so we only print header if there are matches
+                        let mut project_lines: Vec<String> = vec![];
+                        let mut first_in_proj = true;
+                        let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
+                        let count = search_sessions(&sessions, &proj_options, |m| {
+                            if !first_in_proj { project_lines.push(String::new()); }
+                            first_in_proj = false;
+                            let rendered = if !no_diff && m.edit_diff.is_some() {
+                                format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns, max_line_width, diff_ctx)
+                            } else {
+                                format_match(&m, &patterns, max_line_width)
+                            };
+                            project_lines.push(rendered);
+                        });
+
+                        if count > 0 {
+                            let mut out = stdout.lock();
+                            if !first_project_output { writeln!(out).unwrap(); }
+                            first_project_output = false;
+                            writeln!(out, "{}", format_project_header(pp)).unwrap();
+                            writeln!(out).unwrap();
+                            for line in &project_lines {
+                                writeln!(out, "{}", line).unwrap();
+                            }
+                            out.flush().unwrap();
+                            projects_with_results += 1;
+                        }
+                        total_matches += count;
+                        remaining = remaining.saturating_sub(count);
+                    }
+                    println!("{}", format_multi_summary(total_matches, projects_with_results, filtered_projects.len(), total_sessions_searched));
+                    if get_did_truncate() {
+                        eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
+                    }
+                }
+            } else {
+                // Single-project mode (existing behavior unchanged)
+                let project_path = resolve_project(&project);
+
+                let all_sessions = filter_sessions_before(
+                    filter_sessions_since(
+                        discover_sessions_across_configs(&project_path, &config_dirs),
+                        since,
+                    ),
+                    before,
+                );
+
+                if all_sessions.is_empty() {
+                    eprintln!("No session files found for project {}", project_path);
+                    std::process::exit(1);
+                }
+
+                let sessions = match resolve_session(session.as_deref(), &all_sessions) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{}", e);
+                        std::process::exit(1);
+                    }
+                };
+                let stdout = std::io::stdout();
+
+                if sessions_with_matches {
+                    let mut seen = std::collections::HashSet::new();
+                    let total = search_sessions(&sessions, &options, |m| {
+                        let path = sessions.iter()
+                            .find(|s| s.session_id == m.session_id)
+                            .map(|s| s.file_path.to_string_lossy().to_string())
+                            .unwrap_or_else(|| m.session_id.clone());
+                        if seen.insert(path.clone()) {
+                            let mut out = stdout.lock();
+                            writeln!(out, "{}", path).unwrap();
+                        }
+                    });
+                    if total == 0 { std::process::exit(1); }
+                } else if json {
+                    // JSON must be a single valid array, so collect then print.
+                    let mut output: Vec<serde_json::Value> = vec![];
+                    search_sessions(&sessions, &options, |m| {
+                        output.push(json!({
+                            "matchNumber": m.match_number,
+                            "sessionId": m.session_id,
+                            "timestamp": m.timestamp,
+                            "target": m.target.as_str(),
+                            "toolName": m.tool_name,
+                            "matchedLines": m.matched_lines.iter().map(|ml| json!({
+                                "lineNumber": ml.line_number,
+                                "line": ml.line,
+                                "isMatch": ml.is_match,
+                            })).collect::<Vec<_>>(),
+                        }));
+                    });
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                } else {
+                    reset_truncation_state();
+                    let mut first = true;
+                    let total = search_sessions(&sessions, &options, |m| {
+                        let mut out = stdout.lock();
+                        if !first { writeln!(out).unwrap(); }
+                        first = false;
+                        let rendered = if !no_diff && m.edit_diff.is_some() {
+                            format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns, max_line_width, diff_ctx)
+                        } else {
+                            format_match(&m, &patterns, max_line_width)
+                        };
+                        writeln!(out, "{}", rendered).unwrap();
+                        out.flush().unwrap();
+                    });
+                    println!("{}", format_summary(total, &project_path, sessions.len()));
+                    if get_did_truncate() {
+                        eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
+                    }
                 }
             }
         }

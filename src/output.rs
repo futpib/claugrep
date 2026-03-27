@@ -239,6 +239,32 @@ pub fn format_record(r: &ExtractedContent, max_width: usize) -> String {
     format!("{}\n{}", header, display)
 }
 
+pub fn format_project_header(project_path: &str) -> String {
+    style(format!("━━━ {} ━━━", project_path)).bold().blue().to_string()
+}
+
+pub fn format_multi_summary(total_matches: usize, projects_with_results: usize, total_projects_searched: usize, total_sessions: usize) -> String {
+    let proj_info = style(format!(
+        "Searched {} session{} across {} project{} ({} with matches)",
+        total_sessions,
+        if total_sessions == 1 { "" } else { "s" },
+        total_projects_searched,
+        if total_projects_searched == 1 { "" } else { "s" },
+        projects_with_results,
+    )).dim().to_string();
+
+    if total_matches == 0 {
+        format!("{}\nNo matches found.", proj_info)
+    } else {
+        let match_line = style(format!(
+            "{} match{} found.",
+            total_matches,
+            if total_matches == 1 { "" } else { "es" }
+        )).dim().to_string();
+        format!("\n{}\n{}", proj_info, match_line)
+    }
+}
+
 pub fn format_summary(count: usize, project_path: &str, session_count: usize) -> String {
     let project_info = style(format!(
         "Searched {} session{} for project {}",

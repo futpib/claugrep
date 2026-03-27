@@ -23,6 +23,7 @@ pub struct SearchMatch {
     pub edit_diff: Option<EditDiff>,
 }
 
+#[derive(Clone)]
 pub struct SearchOptions {
     pub patterns: Vec<Regex>,
     pub targets: HashSet<Target>,
