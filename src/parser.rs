@@ -14,6 +14,7 @@ pub enum Target {
     SubagentPrompt,
     CompactSummary,
     System,
+    FileHistorySnapshot,
 }
 
 impl Target {
@@ -28,6 +29,7 @@ impl Target {
             Target::SubagentPrompt => "subagent-prompt",
             Target::CompactSummary => "compact-summary",
             Target::System => "system",
+            Target::FileHistorySnapshot => "file-history-snapshot",
         }
     }
 }
@@ -130,6 +132,31 @@ fn extract_from_entry(
                     "sessionId": entry_session,
                 });
                 extract_from_entry(&synth, tool_use_map, targets, session_id, is_subagent, out);
+            }
+        }
+        Some("file-history-snapshot") => {
+            if targets.contains(&Target::FileHistorySnapshot) {
+                let snap_ts = entry["snapshot"]["timestamp"].as_str().unwrap_or("");
+                let backups = entry["snapshot"]["trackedFileBackups"].as_object();
+                let lines: Vec<String> = backups
+                    .map(|m| m.iter().map(|(k, v)| {
+                        let version = v["version"].as_u64().unwrap_or(0);
+                        format!("{} (v{})", k, version)
+                    }).collect())
+                    .unwrap_or_default();
+                let text = if lines.is_empty() {
+                    "(no tracked files)".to_string()
+                } else {
+                    lines.join("\n")
+                };
+                out.push(ExtractedContent {
+                    target: Target::FileHistorySnapshot,
+                    text,
+                    tool_name: None,
+                    timestamp: snap_ts.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
             }
         }
         Some("system") => {
@@ -364,7 +391,7 @@ mod tests {
         [
             Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
-            Target::System,
+            Target::System, Target::FileHistorySnapshot,
         ].into_iter().collect()
     }
 

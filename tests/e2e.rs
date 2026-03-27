@@ -279,6 +279,31 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a file-history-snapshot record with tracked file backups.
+    fn file_history_snapshot(mut self, files: &[&str]) -> Self {
+        let ts = self.next_ts();
+        let mid = format!("msg-{:04}", self.ts_secs);
+        let mut backups = serde_json::Map::new();
+        for (i, file) in files.iter().enumerate() {
+            backups.insert(file.to_string(), serde_json::json!({
+                "backupFileName": format!("abcdef{}@v{}", i, i + 1),
+                "version": i + 1,
+                "backupTime": ts,
+            }));
+        }
+        self.write(serde_json::json!({
+            "type": "file-history-snapshot",
+            "messageId": mid,
+            "isSnapshotUpdate": false,
+            "snapshot": {
+                "messageId": mid,
+                "trackedFileBackups": backups,
+                "timestamp": ts,
+            },
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -2222,4 +2247,122 @@ fn test_system_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "system records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// file-history-snapshot target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_file_history_snapshot() {
+    let world = MockWorld::new();
+    let proj = world.project("fhs-search");
+    proj.session("sess-fhs")
+        .user_message("hello")
+        .file_history_snapshot(&["src/main.rs", "src/lib.rs"])
+        .done();
+
+    // -t file-history-snapshot finds the record
+    let found = world
+        .cmd()
+        .args(["search", "src/main.rs", "-t", "file-history-snapshot", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t file-history-snapshot should find snapshot records");
+
+    // default targets should NOT find file-history-snapshot records
+    let miss = world
+        .cmd()
+        .args(["search", "src/main.rs", "-t", "default", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "file-history-snapshot records should not appear in default targets");
+}
+
+#[test]
+fn test_search_file_history_snapshot_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("fhs-all");
+    proj.session("sess-fhsa")
+        .user_message("hello")
+        .file_history_snapshot(&["UNIQUE_FHS_FILE.rs"])
+        .done();
+
+    // -t all should include file-history-snapshot records
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_FHS_FILE", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include file-history-snapshot records");
+}
+
+#[test]
+fn test_dump_file_history_snapshot() {
+    let world = MockWorld::new();
+    let proj = world.project("fhs-dump");
+    proj.session("sess-fhsd")
+        .user_message("hello user")
+        .file_history_snapshot(&["src/parser.rs", "tests/e2e.rs"])
+        .assistant_message("hello assistant")
+        .done();
+
+    // -t file-history-snapshot shows only snapshot records
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "file-history-snapshot", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("src/parser.rs (v"), "dump should show tracked file paths with version");
+    assert!(text.contains("tests/e2e.rs (v"), "dump should show tracked file paths with version");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_file_history_snapshot_empty_snapshot() {
+    let world = MockWorld::new();
+    let proj = world.project("fhs-empty");
+    proj.session("sess-fhse")
+        .user_message("hello")
+        .file_history_snapshot(&[])
+        .done();
+
+    // Empty snapshot should still be extractable (no tracked files text)
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "file-history-snapshot", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(!text.contains("hello"), "should not show user messages");
+}
+
+#[test]
+fn test_file_history_snapshot_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("fhs-nowarn");
+    proj.session("sess-fhsw")
+        .user_message("hello")
+        .file_history_snapshot(&["src/main.rs"])
+        .done();
+
+    // default dump should not warn about file-history-snapshot records
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "file-history-snapshot records should not trigger unrecognized record warnings");
 }
