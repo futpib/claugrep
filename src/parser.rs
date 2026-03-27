@@ -15,6 +15,7 @@ pub enum Target {
     CompactSummary,
     System,
     FileHistorySnapshot,
+    QueueOperation,
 }
 
 impl Target {
@@ -30,6 +31,7 @@ impl Target {
             Target::CompactSummary => "compact-summary",
             Target::System => "system",
             Target::FileHistorySnapshot => "file-history-snapshot",
+            Target::QueueOperation => "queue-operation",
         }
     }
 }
@@ -167,6 +169,20 @@ fn extract_from_entry(
                     target: Target::System,
                     text: text.to_string(),
                     tool_name: Some(subtype.to_string()),
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
+            }
+        }
+        Some("queue-operation") => {
+            if targets.contains(&Target::QueueOperation) {
+                let operation = entry["operation"].as_str().unwrap_or("unknown");
+                let text = entry["content"].as_str().unwrap_or(operation);
+                out.push(ExtractedContent {
+                    target: Target::QueueOperation,
+                    text: text.to_string(),
+                    tool_name: Some(operation.to_string()),
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
@@ -391,7 +407,7 @@ mod tests {
         [
             Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
-            Target::System, Target::FileHistorySnapshot,
+            Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
         ].into_iter().collect()
     }
 

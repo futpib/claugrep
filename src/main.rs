@@ -47,7 +47,7 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot; or "default" for standard types, "all" for everything including internals)
+        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
@@ -180,6 +180,7 @@ fn all_targets() -> HashSet<Target> {
     let mut t = default_targets();
     t.insert(Target::System);
     t.insert(Target::FileHistorySnapshot);
+    t.insert(Target::QueueOperation);
     t
 }
 
@@ -201,6 +202,7 @@ fn parse_targets(s: &str) -> HashSet<Target> {
         "compact-summary" => Some(Target::CompactSummary),
         "system" => Some(Target::System),
         "file-history-snapshot" => Some(Target::FileHistorySnapshot),
+        "queue-operation" => Some(Target::QueueOperation),
         other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
     }).collect()
 }

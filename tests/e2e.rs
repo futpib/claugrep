@@ -304,6 +304,23 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a queue-operation record.
+    fn queue_operation(mut self, operation: &str, content: Option<&str>) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        let mut v = serde_json::json!({
+            "type": "queue-operation",
+            "operation": operation,
+            "timestamp": ts,
+            "sessionId": sid,
+        });
+        if let Some(c) = content {
+            v["content"] = serde_json::json!(c);
+        }
+        self.write(v);
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -2365,4 +2382,121 @@ fn test_file_history_snapshot_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "file-history-snapshot records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// queue-operation target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_queue_operation_with_content() {
+    let world = MockWorld::new();
+    let proj = world.project("qo-content");
+    proj.session("sess-qo")
+        .user_message("hello")
+        .queue_operation("enqueue", Some("UNIQUE_QUEUED_MSG"))
+        .done();
+
+    // -t queue-operation finds the content
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_QUEUED_MSG", "-t", "queue-operation", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t queue-operation should find enqueued messages by content");
+
+    // default targets should NOT find queue-operation records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_QUEUED_MSG", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "queue-operation records should not appear in default targets");
+}
+
+#[test]
+fn test_search_queue_operation_without_content() {
+    let world = MockWorld::new();
+    let proj = world.project("qo-nocontent");
+    proj.session("sess-qon")
+        .user_message("hello")
+        .queue_operation("dequeue", None)
+        .done();
+
+    // -t queue-operation finds records without content (by matching the operation)
+    let found = world
+        .cmd()
+        .args(["search", "dequeue", "-t", "queue-operation", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t queue-operation should find records by operation when no content");
+}
+
+#[test]
+fn test_search_queue_operation_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("qo-all");
+    proj.session("sess-qoa")
+        .user_message("hello")
+        .queue_operation("enqueue", Some("UNIQUE_QUEUE_ALL"))
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_QUEUE_ALL", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include queue-operation records");
+}
+
+#[test]
+fn test_dump_queue_operation() {
+    let world = MockWorld::new();
+    let proj = world.project("qo-dump");
+    proj.session("sess-qod")
+        .user_message("hello user")
+        .queue_operation("enqueue", Some("queued message text"))
+        .queue_operation("dequeue", None)
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "queue-operation", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("enqueue"), "dump should show operation type");
+    assert!(text.contains("queued message text"), "dump should show enqueued content");
+    assert!(text.contains("dequeue"), "dump should show dequeue operation");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_queue_operation_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("qo-nowarn");
+    proj.session("sess-qow")
+        .user_message("hello")
+        .queue_operation("enqueue", Some("some queued msg"))
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "queue-operation records should not trigger unrecognized record warnings");
 }
