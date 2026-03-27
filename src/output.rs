@@ -515,8 +515,7 @@ mod tests {
             new_string: "short".to_string(),
         };
         let m = make_match(Some(diff));
-        console::set_colors_enabled(false);
-        let output = format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 50, 3);
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 50, 3));
         // The removed line: "-" prefix + truncated content (≤50 chars + "..." = 53) = ≤54 total
         let removed_line = output.lines().find(|l| l.starts_with('-') && !l.contains("---"))
             .expect("should have a removed line");
@@ -536,16 +535,15 @@ mod tests {
             new_string: new.to_string(),
         };
         let m = make_match(Some(diff));
-        console::set_colors_enabled(false);
 
         // With context_lines=0: only the changed lines, no context
-        let output0 = format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 0);
+        let output0 = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 0));
         assert!(!output0.lines().any(|l| l == " a"), "context=0 should not show 'a' as context");
         assert!(output0.contains("-c"), "should show removed 'c'");
         assert!(output0.contains("+X"), "should show added 'X'");
 
         // With context_lines=1: one context line on each side of the change
-        let output1 = format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 1);
+        let output1 = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 1));
         assert!(output1.lines().any(|l| l == " b"), "context=1 should show 'b' as context before");
         assert!(output1.lines().any(|l| l == " d"), "context=1 should show 'd' as context after");
         assert!(!output1.lines().any(|l| l == " a"), "context=1 should not show 'a' (too far)");
@@ -563,8 +561,7 @@ mod tests {
             new_string: new.to_string(),
         };
         let m = make_match(Some(diff));
-        console::set_colors_enabled(false);
-        let output = format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 1);
+        let output = strip_ansi(&format_diff(&m, m.edit_diff.as_ref().unwrap(), &[], 200, 1));
 
         // Should have two @@ hunk markers
         let hunk_count = output.lines().filter(|l| l.starts_with("@@")).count();
