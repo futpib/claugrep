@@ -1018,6 +1018,33 @@ fn test_dump_multi_targets() {
     assert!(!text2.contains("DUMP_MT_USER_TEXT"), "user text should be excluded");
 }
 
+#[test]
+fn test_dump_no_session_defaults_to_latest() {
+    // Without a session argument, dump should default to the latest session (offset 0),
+    // matching journalctl's behaviour of defaulting to the current boot.
+    let world = MockWorld::new();
+    let proj = world.project("dump-default");
+    proj.session("sess-older")
+        .user_message("DUMP_DEFAULT_OLDER")
+        .done();
+    proj.session("sess-newer")
+        .user_message("DUMP_DEFAULT_NEWER")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_DEFAULT_NEWER"),
+        "dump with no session arg should show the latest session");
+    assert!(!text.contains("DUMP_DEFAULT_OLDER"),
+        "dump with no session arg should not show older sessions");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // projects subcommand
 // ═════════════════════════════════════════════════════════════════════════════

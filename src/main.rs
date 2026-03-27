@@ -183,8 +183,8 @@ enum Commands {
 
     /// Dump a session's content as plain text
     Dump {
-        /// Session ID prefix, offset (e.g. -1 for previous, 0 for latest), or "all"
-        #[arg(allow_hyphen_values = true)]
+        /// Session ID prefix, offset (e.g. -1 for previous, 0 for latest), or "all" (default: 0)
+        #[arg(allow_hyphen_values = true, default_value = "0")]
         session: String,
 
         /// Project path (default: current directory)
