@@ -14,7 +14,7 @@ use serde_json::json;
 
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions};
-use crate::output::{format_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
+use crate::output::{format_diff, format_edit_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -155,6 +155,10 @@ enum Commands {
         #[arg(long, default_value = "200")]
         max_line_width: usize,
 
+        /// Show raw key/value format for Edit tool matches instead of unified diff
+        #[arg(long = "no-diff")]
+        no_diff: bool,
+
         /// JSON output
         #[arg(long)]
         json: bool,
@@ -180,6 +184,10 @@ enum Commands {
         /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
+
+        /// Show raw key/value format for Edit tool matches instead of unified diff
+        #[arg(long = "no-diff")]
+        no_diff: bool,
     },
 
     /// Show the last N records of a session (like tail)
@@ -203,6 +211,10 @@ enum Commands {
         /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
+
+        /// Show raw key/value format for Edit tool matches instead of unified diff
+        #[arg(long = "no-diff")]
+        no_diff: bool,
     },
 }
 
@@ -739,7 +751,7 @@ fn main() {
             }
         }
 
-        Commands::Last { count, project, targets, max_line_width, json } => {
+        Commands::Last { count, project, targets, max_line_width, no_diff, json } => {
             let target_set = parse_targets(&targets);
 
             let all_sessions: Vec<_> = filter_sessions_before(
@@ -790,6 +802,12 @@ fn main() {
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else {
                 for r in records {
+                    if !no_diff {
+                        if let Some(ref diff) = r.edit_diff {
+                            println!("{}\n{}", format_record(r, max_line_width), format_edit_diff(diff));
+                            continue;
+                        }
+                    }
                     println!("{}", format_record(r, max_line_width));
                 }
                 eprintln!("Showing {} of {} record{} across {} session{}",
@@ -896,7 +914,7 @@ fn main() {
             }
         }
 
-        Commands::Dump { session, project, targets } => {
+        Commands::Dump { session, project, targets, no_diff } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -932,12 +950,18 @@ fn main() {
                         Some(t) => format!("[{}:{}]", content.target.as_str(), t),
                         None => format!("[{}]", content.target.as_str()),
                     };
+                    if !no_diff {
+                        if let Some(ref diff) = content.edit_diff {
+                            println!("{}\n{}", label, format_edit_diff(diff));
+                            continue;
+                        }
+                    }
                     println!("{} {}", label, content.text);
                 }
             }
         }
 
-        Commands::Tail { count, follow, session, project, targets } => {
+        Commands::Tail { count, follow, session, project, targets, no_diff } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -966,6 +990,12 @@ fn main() {
                     Some(t) => format!("[{}:{}]", content.target.as_str(), t),
                     None => format!("[{}]", content.target.as_str()),
                 };
+                if !no_diff {
+                    if let Some(ref diff) = content.edit_diff {
+                        println!("{}\n{}", label, format_edit_diff(diff));
+                        return;
+                    }
+                }
                 println!("{} {}", label, content.text);
             };
 

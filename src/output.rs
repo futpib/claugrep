@@ -146,25 +146,16 @@ fn color_diff_line(content: &str, patterns: &[Regex], is_old: bool) -> String {
     result
 }
 
-/// Render an Edit tool call as a unified diff block using `similar`.
-/// context_lines controls how many equal lines appear around changed hunks (default 3).
-pub fn format_diff(
-    m: &SearchMatch,
+/// Render an EditDiff as unified diff lines (file headers + hunks).
+/// Returns a Vec of formatted lines (no leading header/tool label).
+fn render_unified_diff(
     diff: &crate::parser::EditDiff,
     patterns: &[Regex],
     max_line_width: usize,
     context_lines: usize,
-) -> String {
-    let short_session = &m.session_id[..m.session_id.len().min(8)];
-    let time = format_timestamp(&m.timestamp);
-    let header = style(format!(
-        "--- Match #{} | session={} | {} | tool-use ---",
-        m.match_number, short_session, time
-    )).cyan().to_string();
-
+) -> Vec<String> {
     let display_path = diff.file_path.trim_start_matches('/');
-    let mut lines = vec![header];
-    lines.push(style("tool: Edit").dim().to_string());
+    let mut lines = vec![];
     lines.push(style(format!("--- a/{}", display_path)).red().to_string());
     lines.push(style(format!("+++ b/{}", display_path)).green().to_string());
 
@@ -199,7 +190,35 @@ pub fn format_diff(
         }
     }
 
+    lines
+}
+
+/// Render an Edit tool call as a unified diff block for search results.
+/// context_lines controls how many equal lines appear around changed hunks (default 3).
+pub fn format_diff(
+    m: &SearchMatch,
+    diff: &crate::parser::EditDiff,
+    patterns: &[Regex],
+    max_line_width: usize,
+    context_lines: usize,
+) -> String {
+    let short_session = &m.session_id[..m.session_id.len().min(8)];
+    let time = format_timestamp(&m.timestamp);
+    let header = style(format!(
+        "--- Match #{} | session={} | {} | tool-use ---",
+        m.match_number, short_session, time
+    )).cyan().to_string();
+
+    let mut lines = vec![header];
+    lines.push(style("tool: Edit").dim().to_string());
+    lines.extend(render_unified_diff(diff, patterns, max_line_width, context_lines));
+
     lines.join("\n")
+}
+
+/// Render an EditDiff as a standalone unified diff (for dump/tail/last).
+pub fn format_edit_diff(diff: &crate::parser::EditDiff) -> String {
+    render_unified_diff(diff, &[], 0, 3).join("\n")
 }
 
 pub fn format_match(m: &SearchMatch, patterns: &[Regex], max_width: usize) -> String {

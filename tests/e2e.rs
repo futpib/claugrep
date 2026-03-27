@@ -2936,3 +2936,135 @@ fn test_tail_follow_respects_targets() {
     assert!(!text.contains("TAIL_FT_INIT"), "should not contain initial record (n=0)");
     assert!(text.contains("TAIL_FT_ASST_VISIBLE"), "should contain appended assistant record");
 }
+
+// ── unified diff in dump/tail/last ───────────────────────────────────────────
+
+#[test]
+fn test_dump_shows_unified_diff_for_edit() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-diff");
+    proj.session("sess-dd")
+        .edit("src/main.rs", "old_fn()", "new_fn()")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("--- a/src/main.rs"), "should show --- file header");
+    assert!(text.contains("+++ b/src/main.rs"), "should show +++ file header");
+    assert!(text.contains("-old_fn()"), "should show removed line");
+    assert!(text.contains("+new_fn()"), "should show added line");
+}
+
+#[test]
+fn test_dump_no_diff_shows_raw_format() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-nodiff");
+    proj.session("sess-dnd")
+        .edit("src/main.rs", "old_fn()", "new_fn()")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--no-diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("--- a/"), "should not show unified diff headers");
+    assert!(text.contains("old_fn()"), "should show raw old_string");
+    assert!(text.contains("new_fn()"), "should show raw new_string");
+}
+
+#[test]
+fn test_tail_shows_unified_diff_for_edit() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-diff");
+    proj.session("sess-td")
+        .edit("lib.rs", "before", "after")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "100", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("--- a/lib.rs"), "should show --- file header");
+    assert!(text.contains("+++ b/lib.rs"), "should show +++ file header");
+    assert!(text.contains("-before"), "should show removed line");
+    assert!(text.contains("+after"), "should show added line");
+}
+
+#[test]
+fn test_tail_no_diff_shows_raw_format() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-nodiff");
+    proj.session("sess-tnd")
+        .edit("lib.rs", "before", "after")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "100", "--no-diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("--- a/"), "should not show unified diff headers");
+    assert!(text.contains("before"), "should show raw old_string");
+    assert!(text.contains("after"), "should show raw new_string");
+}
+
+#[test]
+fn test_last_shows_unified_diff_for_edit() {
+    let world = MockWorld::new();
+    let proj = world.project("last-diff");
+    proj.session("sess-ld")
+        .edit("app.rs", "removed_line", "added_line")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["last", "-n", "100", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("--- a/app.rs"), "should show --- file header");
+    assert!(text.contains("+++ b/app.rs"), "should show +++ file header");
+    assert!(text.contains("-removed_line"), "should show removed line");
+    assert!(text.contains("+added_line"), "should show added line");
+}
+
+#[test]
+fn test_last_no_diff_shows_raw_format() {
+    let world = MockWorld::new();
+    let proj = world.project("last-nodiff");
+    proj.session("sess-lnd")
+        .edit("app.rs", "removed_line", "added_line")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["last", "-n", "100", "--no-diff", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("--- a/"), "should not show unified diff headers");
+    assert!(!text.contains("+++ b/"), "should not show unified diff headers");
+    // last shows first-line-only summary, so raw key/value text is truncated
+    assert!(text.contains("file_path:"), "should show raw key/value format");
+}
