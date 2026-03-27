@@ -123,6 +123,12 @@ impl SessionBuilder {
         }
     }
 
+    /// Set the internal clock offset so the next timestamp starts from a given second.
+    fn with_ts_offset(mut self, secs: u32) -> Self {
+        self.ts_secs = secs;
+        self
+    }
+
     /// Advance the internal clock and return an ISO-8601 timestamp string.
     fn next_ts(&mut self) -> String {
         self.ts_secs += 1;
@@ -2772,4 +2778,57 @@ fn test_tail_output_format_matches_dump() {
     assert!(text.contains("[user]"), "should have [user] label");
     assert!(text.contains("[bash-command:Bash]"), "should have [bash-command:Bash] label");
     assert!(text.contains("[bash-output:Bash]"), "should have [bash-output:Bash] label");
+}
+
+#[test]
+fn test_tail_sorts_by_timestamp_across_subagents() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-subagent-sort");
+    // Main session: messages at t=1..4, then t=100..101
+    proj.session("sess-tail-sort")
+        .user_message("TAIL_SORT_MAIN_EARLY_1")
+        .assistant_message("TAIL_SORT_MAIN_EARLY_2")
+        .user_message("TAIL_SORT_MAIN_EARLY_3")
+        .assistant_message("TAIL_SORT_MAIN_EARLY_4")
+        .with_ts_offset(99)
+        .user_message("TAIL_SORT_MAIN_LATE_1")
+        .assistant_message("TAIL_SORT_MAIN_LATE_2")
+        .done();
+    // Subagent: messages at t=50..51 (between main early and late)
+    proj.subagent_session("sess-tail-sort", "explorer")
+        .with_ts_offset(49)
+        .user_message("TAIL_SORT_SUB_1")
+        .assistant_message("TAIL_SORT_SUB_2")
+        .done();
+
+    // tail -n 1 should return the chronologically last record (main late 2),
+    // not the last record from the last file processed (subagent 2)
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "1", "sess-tail-sort", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("TAIL_SORT_MAIN_LATE_2"),
+        "tail -n 1 should return the chronologically last record, got: {}", text.trim());
+    assert!(!text.contains("TAIL_SORT_SUB"),
+        "should not contain subagent records");
+
+    // tail -n 3 should return the last 3 chronologically:
+    // subagent 2 (t=51), main late 1 (t=100), main late 2 (t=101)
+    let out = world
+        .cmd()
+        .args(["tail", "-n", "3", "sess-tail-sort", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("TAIL_SORT_SUB_2"), "should contain subagent record at t=51");
+    assert!(text.contains("TAIL_SORT_MAIN_LATE_1"), "should contain main late 1 at t=100");
+    assert!(text.contains("TAIL_SORT_MAIN_LATE_2"), "should contain main late 2 at t=101");
+    assert!(!text.contains("TAIL_SORT_MAIN_EARLY"), "should not contain early main records");
+    assert!(!text.contains("TAIL_SORT_SUB_1"), "should not contain subagent record at t=50");
 }

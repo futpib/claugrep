@@ -967,6 +967,8 @@ fn main() {
                 ));
             }
 
+            all_contents.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
             let skip = all_contents.len().saturating_sub(count);
             for content in all_contents.into_iter().skip(skip) {
                 let label = match &content.tool_name {
