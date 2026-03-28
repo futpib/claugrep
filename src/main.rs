@@ -188,6 +188,10 @@ enum Commands {
         /// Show raw key/value format for Edit tool matches instead of unified diff
         #[arg(long = "no-diff")]
         no_diff: bool,
+
+        /// JSON output (raw JSONL records)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show the last N records of a session (like tail)
@@ -215,6 +219,10 @@ enum Commands {
         /// Show raw key/value format for Edit tool matches instead of unified diff
         #[arg(long = "no-diff")]
         no_diff: bool,
+
+        /// JSON output (raw JSONL records)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -549,7 +557,6 @@ fn main() {
 
 
                 if json {
-                    let mut all_output: Vec<serde_json::Value> = vec![];
                     for proj in &filtered_projects {
                         if remaining == 0 { break; }
                         let pp = &proj.decoded_path;
@@ -567,23 +574,12 @@ fn main() {
                         };
                         let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
                         let count = search_sessions(&sessions, &proj_options, |m| {
-                            all_output.push(json!({
-                                "projectPath": pp,
-                                "matchNumber": m.match_number,
-                                "sessionId": m.session_id,
-                                "timestamp": m.timestamp,
-                                "target": m.target.as_str(),
-                                "toolName": m.tool_name,
-                                "matchedLines": m.matched_lines.iter().map(|ml| json!({
-                                    "lineNumber": ml.line_number,
-                                    "line": ml.line,
-                                    "isMatch": ml.is_match,
-                                })).collect::<Vec<_>>(),
-                            }));
+                            if let Some(ref raw) = m.raw_entry {
+                                println!("{}", raw);
+                            }
                         });
                         remaining = remaining.saturating_sub(count);
                     }
-                    println!("{}", serde_json::to_string_pretty(&all_output).unwrap());
                 } else if sessions_with_matches {
                     let mut seen = std::collections::HashSet::new();
                     for proj in &filtered_projects {
@@ -712,23 +708,11 @@ fn main() {
                     });
                     if total == 0 { std::process::exit(1); }
                 } else if json {
-                    // JSON must be a single valid array, so collect then print.
-                    let mut output: Vec<serde_json::Value> = vec![];
                     search_sessions(&sessions, &options, |m| {
-                        output.push(json!({
-                            "matchNumber": m.match_number,
-                            "sessionId": m.session_id,
-                            "timestamp": m.timestamp,
-                            "target": m.target.as_str(),
-                            "toolName": m.tool_name,
-                            "matchedLines": m.matched_lines.iter().map(|ml| json!({
-                                "lineNumber": ml.line_number,
-                                "line": ml.line,
-                                "isMatch": ml.is_match,
-                            })).collect::<Vec<_>>(),
-                        }));
+                        if let Some(ref raw) = m.raw_entry {
+                            println!("{}", raw);
+                        }
                     });
-                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
                 } else {
                     reset_truncation_state();
                     let mut first = true;
@@ -779,11 +763,12 @@ fn main() {
             // Collect all content across all sessions
             let mut all_records: Vec<parser::ExtractedContent> = vec![];
             for session in &all_sessions {
-                let contents = parser::extract_content(
+                let contents = parser::extract_content_opts(
                     &session.file_path,
                     &target_set,
                     &session.session_id,
                     session.is_subagent,
+                    json,
                 );
                 all_records.extend(contents);
             }
@@ -796,14 +781,11 @@ fn main() {
             let records = &all_records[start..];
 
             if json {
-                let output: Vec<_> = records.iter().map(|r| serde_json::json!({
-                    "sessionId": r.session_id,
-                    "timestamp": r.timestamp,
-                    "target": r.target.as_str(),
-                    "toolName": r.tool_name,
-                    "text": r.text,
-                })).collect();
-                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                for r in records {
+                    if let Some(ref raw) = r.raw_entry {
+                        println!("{}", raw);
+                    }
+                }
             } else {
                 for r in records {
                     if !no_diff {
@@ -918,7 +900,7 @@ fn main() {
             }
         }
 
-        Commands::Dump { session, project, targets, no_diff } => {
+        Commands::Dump { session, project, targets, no_diff, json } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -943,13 +925,20 @@ fn main() {
             }
 
             for s in &sessions {
-                let contents = parser::extract_content(
+                let contents = parser::extract_content_opts(
                     &s.file_path,
                     &target_set,
                     &s.session_id,
                     s.is_subagent,
+                    json,
                 );
                 for content in contents {
+                    if json {
+                        if let Some(ref raw) = content.raw_entry {
+                            println!("{}", raw);
+                        }
+                        continue;
+                    }
                     let label = match &content.tool_name {
                         Some(t) => format!("[{}:{}]", content.target.as_str(), t),
                         None => format!("[{}]", content.target.as_str()),
@@ -965,7 +954,7 @@ fn main() {
             }
         }
 
-        Commands::Tail { count, follow, session, project, targets, no_diff } => {
+        Commands::Tail { count, follow, session, project, targets, no_diff, json } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -990,6 +979,12 @@ fn main() {
             }
 
             let print_content = |content: &parser::ExtractedContent| {
+                if json {
+                    if let Some(ref raw) = content.raw_entry {
+                        println!("{}", raw);
+                    }
+                    return;
+                }
                 let label = match &content.tool_name {
                     Some(t) => format!("[{}:{}]", content.target.as_str(), t),
                     None => format!("[{}]", content.target.as_str()),
@@ -1005,11 +1000,12 @@ fn main() {
 
             let mut all_contents = vec![];
             for s in &sessions {
-                all_contents.extend(parser::extract_content(
+                all_contents.extend(parser::extract_content_opts(
                     &s.file_path,
                     &target_set,
                     &s.session_id,
                     s.is_subagent,
+                    json,
                 ));
             }
 

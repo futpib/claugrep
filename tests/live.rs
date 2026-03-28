@@ -238,20 +238,13 @@ fn test_search_json_output_structure() {
 
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("--json should produce valid JSON");
-    let arr = parsed.as_array().expect("expected JSON array");
-    assert!(!arr.is_empty());
-    let first = &arr[0];
-    assert!(first["matchNumber"].is_number());
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSONL line");
+    let first: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("each line must be valid JSON");
+    assert!(first["type"].is_string(), "raw entry should have a type field");
+    assert_eq!(first["type"].as_str(), Some("user"));
     assert!(first["sessionId"].is_string());
-    assert!(first["timestamp"].is_string());
-    assert_eq!(first["target"].as_str(), Some("user"));
-    assert!(first["matchedLines"].is_array());
-    let ml = &first["matchedLines"][0];
-    assert!(ml["lineNumber"].is_number());
-    assert!(ml["line"].is_string());
-    assert!(ml["isMatch"].is_boolean());
 }
 
 #[test]

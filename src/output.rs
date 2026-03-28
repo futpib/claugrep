@@ -445,6 +445,7 @@ mod tests {
             text: String::new(),
             matched_lines: vec![],
             edit_diff,
+            raw_entry: None,
         }
     }
 

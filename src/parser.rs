@@ -57,6 +57,8 @@ pub struct ExtractedContent {
     pub session_id: String,
     /// Populated for Edit tool calls; `None` for everything else.
     pub edit_diff: Option<EditDiff>,
+    /// The original JSONL entry, preserved when `keep_raw` is set.
+    pub raw_entry: Option<serde_json::Value>,
 }
 
 pub type ToolUseMap = HashMap<String, String>;
@@ -79,11 +81,22 @@ pub fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
     }
 }
 
+#[allow(dead_code)]
 pub fn extract_content(
     path: &Path,
     targets: &std::collections::HashSet<Target>,
     session_id: &str,
     is_subagent: bool,
+) -> Vec<ExtractedContent> {
+    extract_content_opts(path, targets, session_id, is_subagent, false)
+}
+
+pub fn extract_content_opts(
+    path: &Path,
+    targets: &std::collections::HashSet<Target>,
+    session_id: &str,
+    is_subagent: bool,
+    keep_raw: bool,
 ) -> Vec<ExtractedContent> {
     let file = match fs::File::open(path) {
         Ok(f) => f,
@@ -106,7 +119,13 @@ pub fn extract_content(
         match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(entry) => {
                 collect_tool_use_ids(&entry, &mut tool_use_map);
+                let before = results.len();
                 extract_from_entry(&entry, &tool_use_map, targets, session_id, is_subagent, &mut results);
+                if keep_raw {
+                    for r in &mut results[before..] {
+                        r.raw_entry = Some(entry.clone());
+                    }
+                }
             }
             Err(e) => eprintln!("warning: {}: line {}: {}", path.display(), line_num + 1, e),
         }
@@ -164,6 +183,7 @@ pub fn extract_from_entry(
                     timestamp: snap_ts.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -178,6 +198,7 @@ pub fn extract_from_entry(
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -192,6 +213,7 @@ pub fn extract_from_entry(
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -205,6 +227,7 @@ pub fn extract_from_entry(
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -218,6 +241,7 @@ pub fn extract_from_entry(
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -231,6 +255,7 @@ pub fn extract_from_entry(
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -272,6 +297,7 @@ fn extract_user(
                 timestamp: timestamp.to_string(),
                 session_id: session_id.to_string(),
                 edit_diff: None,
+                raw_entry: None,
             });
         } else if let Some(arr) = content.as_array() {
             for block in arr {
@@ -284,6 +310,7 @@ fn extract_user(
                             timestamp: timestamp.to_string(),
                             session_id: session_id.to_string(),
                             edit_diff: None,
+                            raw_entry: None,
                         });
                     }
                 }
@@ -317,6 +344,7 @@ fn extract_user(
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -382,6 +410,7 @@ fn extract_assistant(
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
+                    raw_entry: None,
                 });
             }
         }
@@ -399,6 +428,7 @@ fn extract_assistant(
                         timestamp: timestamp.to_string(),
                         session_id: session_id.to_string(),
                         edit_diff: None,
+                        raw_entry: None,
                     });
                 }
             }
@@ -427,6 +457,7 @@ fn extract_assistant(
                     timestamp: timestamp.to_string(),
                     session_id: session_id.to_string(),
                     edit_diff,
+                    raw_entry: None,
                 });
             }
         }

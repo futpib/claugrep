@@ -1,11 +1,10 @@
 use std::collections::HashSet;
 use regex::Regex;
 
-use crate::parser::{extract_content, EditDiff, Target};
+use crate::parser::{extract_content_opts, EditDiff, Target};
 use crate::sessions::SessionFile;
 
 pub struct MatchedLine {
-    pub line_number: usize,
     pub line: String,
     pub is_match: bool,
 }
@@ -21,6 +20,8 @@ pub struct SearchMatch {
     pub matched_lines: Vec<MatchedLine>,
     /// Set for Edit tool-use matches when diff data is available.
     pub edit_diff: Option<EditDiff>,
+    /// The original JSONL entry, preserved when `json_output` is set.
+    pub raw_entry: Option<serde_json::Value>,
 }
 
 #[derive(Clone)]
@@ -59,7 +60,6 @@ fn find_matches(
 
     if context_before == 0 && context_after == 0 {
         return Some(matching.iter().map(|&n| MatchedLine {
-            line_number: n,
             line: lines[n].to_string(),
             is_match: true,
         }).collect());
@@ -76,7 +76,6 @@ fn find_matches(
 
     let matching_set: HashSet<usize> = matching.into_iter().collect();
     Some(visible.into_iter().map(|n| MatchedLine {
-        line_number: n,
         line: lines[n].to_string(),
         is_match: matching_set.contains(&n),
     }).collect())
@@ -95,11 +94,12 @@ where
             break;
         }
 
-        let contents = extract_content(
+        let contents = extract_content_opts(
             &session.file_path,
             &options.targets,
             &session.session_id,
             session.is_subagent,
+            options.json_output,
         );
 
         for content in contents {
@@ -123,6 +123,7 @@ where
                     text: content.text,
                     matched_lines,
                     edit_diff: content.edit_diff,
+                    raw_entry: content.raw_entry,
                 });
             }
         }

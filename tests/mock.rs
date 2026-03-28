@@ -470,16 +470,14 @@ fn test_last_json_output() {
         .unwrap();
 
     assert!(out.status.success());
-    let parsed: serde_json::Value = serde_json::from_str(stdout(&out))
-        .expect("--json must produce valid JSON");
-    let arr = parsed.as_array().expect("expected JSON array");
-    assert!(!arr.is_empty());
-    let first = &arr[0];
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSONL line");
+    let first: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("each line must be valid JSON");
+    assert!(first["type"].is_string(), "raw entry should have a type field");
     assert!(first["sessionId"].is_string());
-    assert!(first["timestamp"].is_string());
-    assert!(first["target"].is_string());
-    assert!(first["text"].is_string());
-    assert!(first["text"].as_str().unwrap().contains("LAST_JSON_CONTENT"));
+    assert!(text.contains("LAST_JSON_CONTENT"));
 }
 
 #[test]
@@ -1399,6 +1397,30 @@ fn test_projects_empty_exits_nonzero() {
 }
 
 #[test]
+fn test_sessions_json_output() {
+    let world = MockWorld::new();
+    let proj = world.project("sess-json");
+    proj.session("sess-sj1").user_message("first").done();
+    proj.session("sess-sj2").user_message("second").done();
+
+    let out = world
+        .cmd()
+        .args(["sessions", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out))
+        .expect("--json must produce valid JSON");
+    let arr = parsed.as_array().expect("expected JSON array");
+    assert_eq!(arr.len(), 2, "expected 2 sessions");
+    let first = &arr[0];
+    assert!(first["sessionId"].is_string());
+    assert!(first["filePath"].is_string());
+    assert!(first["mtime"].is_number());
+}
+
+#[test]
 fn test_projects_shows_timestamp() {
     let world = MockWorld::new();
     let proj = world.project("tscheck");
@@ -2195,7 +2217,7 @@ fn test_diff_json_output_unaffected() {
         .edit("/y.rs", "before\n", "after\n")
         .done();
 
-    // --json output is always raw matched lines, unaffected by diff behaviour
+    // --json output prints raw JSONL records
     let out = world
         .cmd()
         .args(["search", "before", "-t", "tool-use", "--json", "--project", proj.path()])
@@ -2204,10 +2226,11 @@ fn test_diff_json_output_unaffected() {
 
     assert!(out.status.success());
     let text = stdout(&out);
-    let parsed: serde_json::Value = serde_json::from_str(text)
-        .expect("--json should produce valid JSON");
-    let arr = parsed.as_array().expect("expected JSON array");
-    assert!(!arr.is_empty(), "should have at least one match");
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSONL line");
+    let first: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("each line must be valid JSON");
+    assert!(first["type"].is_string(), "raw entry should have a type field");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3285,4 +3308,91 @@ fn test_last_no_diff_shows_raw_format() {
     assert!(!text.contains("+++ b/"), "should not show unified diff headers");
     // last shows first-line-only summary, so raw key/value text is truncated
     assert!(text.contains("file_path:"), "should show raw key/value format");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// --json raw JSONL output
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_dump_json_output() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-json");
+    proj.session("sess-dj")
+        .user_message("DUMP_JSON_TEST")
+        .assistant_message("reply here")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines.len() >= 2, "should have at least 2 JSONL lines (user + assistant)");
+
+    for line in &lines {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .expect("each line must be valid JSON");
+        assert!(entry["type"].is_string(), "raw entry should have a type field");
+    }
+
+    assert!(text.contains("DUMP_JSON_TEST"), "should contain user message text");
+}
+
+#[test]
+fn test_tail_json_output() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-json");
+    proj.session("sess-tj")
+        .user_message("TAIL_JSON_TEST")
+        .assistant_message("tail reply")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["tail", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSONL line");
+
+    for line in &lines {
+        let entry: serde_json::Value = serde_json::from_str(line)
+            .expect("each line must be valid JSON");
+        assert!(entry["type"].is_string(), "raw entry should have a type field");
+    }
+
+    assert!(text.contains("TAIL_JSON_TEST"), "should contain user message text");
+}
+
+#[test]
+fn test_search_json_outputs_raw_entries() {
+    let world = MockWorld::new();
+    let proj = world.project("search-json-raw");
+    proj.session("sess-sjr")
+        .user_message("SEARCH_RAW_JSON_MARKER")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "SEARCH_RAW_JSON_MARKER", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSONL line");
+
+    let first: serde_json::Value = serde_json::from_str(lines[0])
+        .expect("each line must be valid JSON");
+    assert_eq!(first["type"].as_str(), Some("user"), "raw entry should preserve original type");
+    assert!(first["message"].is_object(), "raw entry should have message field");
 }
