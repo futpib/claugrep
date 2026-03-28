@@ -231,6 +231,8 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::System);
     t.insert(Target::FileHistorySnapshot);
     t.insert(Target::LastPrompt);
+    t.insert(Target::AgentName);
+    t.insert(Target::CustomTitle);
     t
 }
 
@@ -254,6 +256,8 @@ fn parse_targets(s: &str) -> HashSet<Target> {
         "file-history-snapshot" => Some(Target::FileHistorySnapshot),
         "queue-operation" => Some(Target::QueueOperation),
         "last-prompt" => Some(Target::LastPrompt),
+        "agent-name" => Some(Target::AgentName),
+        "custom-title" => Some(Target::CustomTitle),
         other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
     }).collect()
 }

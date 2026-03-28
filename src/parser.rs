@@ -17,6 +17,8 @@ pub enum Target {
     FileHistorySnapshot,
     QueueOperation,
     LastPrompt,
+    AgentName,
+    CustomTitle,
 }
 
 impl Target {
@@ -34,6 +36,8 @@ impl Target {
             Target::FileHistorySnapshot => "file-history-snapshot",
             Target::QueueOperation => "queue-operation",
             Target::LastPrompt => "last-prompt",
+            Target::AgentName => "agent-name",
+            Target::CustomTitle => "custom-title",
         }
     }
 }
@@ -196,6 +200,32 @@ pub fn extract_from_entry(
                 let text = entry["lastPrompt"].as_str().unwrap_or("");
                 out.push(ExtractedContent {
                     target: Target::LastPrompt,
+                    text: text.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
+            }
+        }
+        Some("agent-name") => {
+            if targets.contains(&Target::AgentName) {
+                let text = entry["agentName"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::AgentName,
+                    text: text.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                });
+            }
+        }
+        Some("custom-title") => {
+            if targets.contains(&Target::CustomTitle) {
+                let text = entry["customTitle"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::CustomTitle,
                     text: text.to_string(),
                     tool_name: None,
                     timestamp: timestamp.to_string(),
@@ -423,7 +453,7 @@ mod tests {
             Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
-            Target::LastPrompt,
+            Target::LastPrompt, Target::AgentName, Target::CustomTitle,
         ].into_iter().collect()
     }
 
@@ -566,5 +596,48 @@ mod tests {
         let edit = contents.iter().find(|c| c.tool_name.as_deref() == Some("Edit"));
         assert!(edit.is_some());
         assert!(edit.unwrap().edit_diff.is_none(), "incomplete Edit input should have no edit_diff");
+    }
+
+    #[test]
+    fn test_extract_agent_name() {
+        let f = write_jsonl(&[
+            r#"{"type":"agent-name","agentName":"my-agent","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let an = contents.iter().find(|c| c.target == Target::AgentName);
+        assert!(an.is_some(), "should extract agent-name record");
+        assert_eq!(an.unwrap().text, "my-agent");
+    }
+
+    #[test]
+    fn test_extract_custom_title() {
+        let f = write_jsonl(&[
+            r#"{"type":"custom-title","customTitle":"my-title","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let ct = contents.iter().find(|c| c.target == Target::CustomTitle);
+        assert!(ct.is_some(), "should extract custom-title record");
+        assert_eq!(ct.unwrap().text, "my-title");
+    }
+
+    #[test]
+    fn test_agent_name_not_warned_as_unrecognized() {
+        let f = write_jsonl(&[
+            r#"{"type":"agent-name","agentName":"test","sessionId":"s"}"#,
+        ]);
+        // Just ensure it doesn't panic and produces a result
+        let targets: HashSet<Target> = [Target::AgentName].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 1);
+    }
+
+    #[test]
+    fn test_custom_title_not_warned_as_unrecognized() {
+        let f = write_jsonl(&[
+            r#"{"type":"custom-title","customTitle":"test","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::CustomTitle].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 1);
     }
 }

@@ -343,6 +343,28 @@ impl SessionBuilder {
         self
     }
 
+    /// Write an agent-name record.
+    fn agent_name(mut self, name: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "agent-name",
+            "agentName": name,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write a custom-title record.
+    fn custom_title(mut self, title: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "custom-title",
+            "customTitle": title,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -2616,6 +2638,196 @@ fn test_last_prompt_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "last-prompt records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// agent-name target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_agent_name() {
+    let world = MockWorld::new();
+    let proj = world.project("an-search");
+    proj.session("sess-an")
+        .user_message("hello")
+        .agent_name("UNIQUE_AGENT_NAME_XYZ")
+        .assistant_message("hi")
+        .done();
+
+    // -t agent-name finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_AGENT_NAME_XYZ", "-t", "agent-name", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t agent-name should find agent-name records");
+
+    // default targets should NOT find agent-name records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_AGENT_NAME_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "agent-name records should not appear in default targets");
+}
+
+#[test]
+fn test_search_agent_name_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("an-all");
+    proj.session("sess-ana")
+        .user_message("hello")
+        .agent_name("UNIQUE_AN_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_AN_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include agent-name records");
+}
+
+#[test]
+fn test_dump_agent_name() {
+    let world = MockWorld::new();
+    let proj = world.project("an-dump");
+    proj.session("sess-and")
+        .user_message("hello user")
+        .agent_name("my-cool-agent")
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "agent-name", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("my-cool-agent"), "dump should show agent name");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_agent_name_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("an-nowarn");
+    proj.session("sess-anw")
+        .user_message("hello")
+        .agent_name("some-agent")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "agent-name records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// custom-title target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_custom_title() {
+    let world = MockWorld::new();
+    let proj = world.project("ct-search");
+    proj.session("sess-ct")
+        .user_message("hello")
+        .custom_title("UNIQUE_CUSTOM_TITLE_XYZ")
+        .assistant_message("hi")
+        .done();
+
+    // -t custom-title finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_CUSTOM_TITLE_XYZ", "-t", "custom-title", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t custom-title should find custom-title records");
+
+    // default targets should NOT find custom-title records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_CUSTOM_TITLE_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "custom-title records should not appear in default targets");
+}
+
+#[test]
+fn test_search_custom_title_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("ct-all");
+    proj.session("sess-cta")
+        .user_message("hello")
+        .custom_title("UNIQUE_CT_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_CT_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include custom-title records");
+}
+
+#[test]
+fn test_dump_custom_title() {
+    let world = MockWorld::new();
+    let proj = world.project("ct-dump");
+    proj.session("sess-ctd")
+        .user_message("hello user")
+        .custom_title("my-custom-title")
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "custom-title", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("my-custom-title"), "dump should show custom title");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_custom_title_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("ct-nowarn");
+    proj.session("sess-ctw")
+        .user_message("hello")
+        .custom_title("some-title")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "custom-title records should not trigger unrecognized record warnings");
 }
 
 // ── tail tests ───────────────────────────────────────────────────────────────
