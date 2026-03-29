@@ -169,6 +169,10 @@ enum Commands {
         /// JSON output
         #[arg(long)]
         json: bool,
+
+        /// List sessions within each project
+        #[arg(short = 's', long)]
+        sessions: bool,
     },
 
     /// Dump a session's content as plain text
@@ -846,7 +850,7 @@ fn main() {
             }
         }
 
-        Commands::Projects { json } => {
+        Commands::Projects { json, sessions: list_sessions } => {
             let projects = discover_projects(&config_dirs);
 
             if projects.is_empty() {
@@ -861,14 +865,39 @@ fn main() {
                     let mtime = p.latest_mtime
                         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs());
-                    json!({
+                    let mut entry = json!({
                         "path": p.decoded_path,
                         "encodedPath": p.encoded_path,
                         "verified": p.verified,
                         "sessionCount": p.session_count,
                         "latestMtime": mtime,
                         "account": p.account,
-                    })
+                    });
+                    if list_sessions {
+                        let config_dir = config_dirs.iter()
+                            .find(|(acct, _)| acct == &p.account)
+                            .map(|(_, d)| d.as_path())
+                            .unwrap_or_else(|| config_dirs.first().map(|(_, d)| d.as_path()).unwrap());
+                        let sess = filter_sessions_before(
+                            filter_sessions_since(
+                                discover_sessions(&p.decoded_path, None, config_dir),
+                                since,
+                            ),
+                            before,
+                        );
+                        let sess_json: Vec<_> = sess.iter().map(|s| {
+                            let smtime = s.mtime.duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0);
+                            json!({
+                                "sessionId": s.session_id,
+                                "filePath": s.file_path.to_string_lossy(),
+                                "mtime": smtime,
+                                "isSubagent": s.is_subagent,
+                            })
+                        }).collect();
+                        entry["sessions"] = json!(sess_json);
+                    }
+                    entry
                 }).collect();
                 println!("{}", serde_json::to_string_pretty(&output).unwrap());
             } else {
@@ -879,7 +908,6 @@ fn main() {
                             dt.format("%Y-%m-%d %H:%M:%S").to_string()
                         })
                         .unwrap_or_else(|| "no sessions".to_string());
-                    let unverified = if p.verified { "" } else { " [unverified]" };
                     let account_str = if has_multiple_accounts {
                         match &p.account {
                             Some(a) => format!(" [{}]", a),
@@ -888,13 +916,30 @@ fn main() {
                     } else {
                         String::new()
                     };
-                    println!("{} ({} session{}) {}{}{}",
+                    println!("{} ({} session{}) {}{}",
                         p.decoded_path,
                         p.session_count,
                         if p.session_count == 1 { "" } else { "s" },
                         ts_str,
-                        unverified,
                         account_str);
+                    if list_sessions {
+                        let config_dir = config_dirs.iter()
+                            .find(|(acct, _)| acct == &p.account)
+                            .map(|(_, d)| d.as_path())
+                            .unwrap_or_else(|| config_dirs.first().map(|(_, d)| d.as_path()).unwrap());
+                        let sess = filter_sessions_before(
+                            filter_sessions_since(
+                                discover_sessions(&p.decoded_path, None, config_dir),
+                                since,
+                            ),
+                            before,
+                        );
+                        for s in &sess {
+                            if s.is_subagent { continue; }
+                            let smtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
+                            println!("  {} {}", smtime.format("%Y-%m-%d %H:%M:%S"), s.session_id);
+                        }
+                    }
                 }
                 eprintln!("{} project{}", projects.len(), if projects.len() == 1 { "" } else { "s" });
             }

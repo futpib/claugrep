@@ -1457,6 +1457,62 @@ fn test_projects_encoded_path_in_json() {
     assert!(ep.contains("enctest"), "encodedPath should contain project name");
 }
 
+#[test]
+fn test_projects_sessions_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("nested");
+    proj.session("sess-n1").user_message("first").done();
+    proj.session("sess-n2").user_message("second").done();
+
+    let out = world.cmd().args(["projects", "--sessions"]).output().unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = stdout(&out);
+    // Project line should appear
+    assert!(text.contains("nested"), "expected project name in output");
+    // Session IDs should appear indented
+    assert!(text.contains("sess-n1"), "expected sess-n1 in output, got: {}", text);
+    assert!(text.contains("sess-n2"), "expected sess-n2 in output, got: {}", text);
+}
+
+#[test]
+fn test_projects_sessions_json() {
+    let world = MockWorld::new();
+    let proj = world.project("nestedjson");
+    proj.session("sess-nj1").user_message("first").done();
+    proj.session("sess-nj2").user_message("second").done();
+
+    let out = world.cmd().args(["projects", "--json", "--sessions"]).output().unwrap();
+
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out))
+        .expect("--json must produce valid JSON");
+    let arr = parsed.as_array().expect("expected JSON array");
+
+    let entry = arr.iter().find(|v| {
+        v["path"].as_str().unwrap_or("").contains("nestedjson")
+    }).expect("expected nestedjson entry");
+
+    let sessions = entry["sessions"].as_array().expect("expected sessions array");
+    assert_eq!(sessions.len(), 2, "expected 2 sessions");
+    assert!(sessions[0]["sessionId"].is_string());
+    assert!(sessions[0]["mtime"].is_number());
+}
+
+#[test]
+fn test_projects_no_unverified_label() {
+    let world = MockWorld::new();
+    // Mock project paths don't exist on real filesystem, so they would have been [unverified]
+    let proj = world.project("fakepath");
+    proj.session("sess-fp").user_message("msg").done();
+
+    let out = world.cmd().args(["projects"]).output().unwrap();
+
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(!text.contains("[unverified]"), "output should not contain [unverified], got: {}", text);
+}
+
 // =============================================================================
 // error handling — incorrect invocations exit nonzero with clap's default output
 // =============================================================================
