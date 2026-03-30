@@ -196,6 +196,10 @@ enum Commands {
         /// JSON output (raw JSONL records)
         #[arg(long)]
         json: bool,
+
+        /// Include subagent transcripts
+        #[arg(long)]
+        subagents: bool,
     },
 
     /// Show the last N records of a session (like tail)
@@ -227,6 +231,10 @@ enum Commands {
         /// JSON output (raw JSONL records)
         #[arg(long)]
         json: bool,
+
+        /// Include subagent transcripts
+        #[arg(long)]
+        subagents: bool,
     },
 }
 
@@ -945,7 +953,7 @@ fn main() {
             }
         }
 
-        Commands::Dump { session, project, targets, no_diff, json } => {
+        Commands::Dump { session, project, targets, no_diff, json, subagents } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -969,37 +977,44 @@ fn main() {
                 std::process::exit(1);
             }
 
+            let mut all_contents = vec![];
             for s in &sessions {
-                let contents = parser::extract_content_opts(
+                if !subagents && s.is_subagent {
+                    continue;
+                }
+                all_contents.extend(parser::extract_content_opts(
                     &s.file_path,
                     &target_set,
                     &s.session_id,
                     s.is_subagent,
                     json,
-                );
-                for content in contents {
-                    if json {
-                        if let Some(ref raw) = content.raw_entry {
-                            println!("{}", raw);
-                        }
+                ));
+            }
+
+            all_contents.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+            for content in &all_contents {
+                if json {
+                    if let Some(ref raw) = content.raw_entry {
+                        println!("{}", raw);
+                    }
+                    continue;
+                }
+                let label = match &content.tool_name {
+                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
+                    None => format!("[{}]", content.target.as_str()),
+                };
+                if !no_diff {
+                    if let Some(ref diff) = content.edit_diff {
+                        println!("{}\n{}", label, format_edit_diff(diff));
                         continue;
                     }
-                    let label = match &content.tool_name {
-                        Some(t) => format!("[{}:{}]", content.target.as_str(), t),
-                        None => format!("[{}]", content.target.as_str()),
-                    };
-                    if !no_diff {
-                        if let Some(ref diff) = content.edit_diff {
-                            println!("{}\n{}", label, format_edit_diff(diff));
-                            continue;
-                        }
-                    }
-                    println!("{} {}", label, content.text);
                 }
+                println!("{} {}", label, content.text);
             }
         }
 
-        Commands::Tail { count, follow, session, project, targets, no_diff, json } => {
+        Commands::Tail { count, follow, session, project, targets, no_diff, json, subagents } => {
             let project_path = resolve_project(&project);
             let target_set = parse_targets(&targets);
 
@@ -1045,6 +1060,9 @@ fn main() {
 
             let mut all_contents = vec![];
             for s in &sessions {
+                if !subagents && s.is_subagent {
+                    continue;
+                }
                 all_contents.extend(parser::extract_content_opts(
                     &s.file_path,
                     &target_set,

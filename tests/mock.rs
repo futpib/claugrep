@@ -3118,11 +3118,11 @@ fn test_tail_sorts_by_timestamp_across_subagents() {
     assert!(!text.contains("TAIL_SORT_SUB"),
         "should not contain subagent records");
 
-    // tail -n 3 should return the last 3 chronologically:
+    // tail -n 3 --subagents should return the last 3 chronologically:
     // subagent 2 (t=51), main late 1 (t=100), main late 2 (t=101)
     let out = world
         .cmd()
-        .args(["tail", "-n", "3", "sess-tail-sort", "--project", proj.path()])
+        .args(["tail", "-n", "3", "--subagents", "sess-tail-sort", "--project", proj.path()])
         .output()
         .unwrap();
 
@@ -3451,4 +3451,62 @@ fn test_search_json_outputs_raw_entries() {
         .expect("each line must be valid JSON");
     assert_eq!(first["type"].as_str(), Some("user"), "raw entry should preserve original type");
     assert!(first["message"].is_object(), "raw entry should have message field");
+}
+
+// ── dump: chronological ordering with subagents ─────────────────────────────
+
+#[test]
+fn test_dump_sorts_by_timestamp_across_subagents() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-subagent-sort");
+    // Main session: messages at t=1..2, then t=100..101
+    proj.session("sess-dump-sort")
+        .user_message("DUMP_SORT_MAIN_EARLY")
+        .assistant_message("DUMP_SORT_MAIN_EARLY_REPLY")
+        .with_ts_offset(99)
+        .user_message("DUMP_SORT_MAIN_LATE")
+        .assistant_message("DUMP_SORT_MAIN_LATE_REPLY")
+        .done();
+    // Subagent: messages at t=50..51 (between main early and late)
+    proj.subagent_session("sess-dump-sort", "explorer")
+        .with_ts_offset(49)
+        .user_message("DUMP_SORT_SUB_PROMPT")
+        .assistant_message("DUMP_SORT_SUB_REPLY")
+        .done();
+
+    // Without --subagents, subagent content should be hidden
+    let out = world
+        .cmd()
+        .args(["dump", "sess-dump-sort", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("DUMP_SORT_MAIN_EARLY"), "should contain early main message");
+    assert!(text.contains("DUMP_SORT_MAIN_LATE"), "should contain late main message");
+    assert!(!text.contains("DUMP_SORT_SUB_PROMPT"), "should NOT contain subagent message without --subagents");
+
+    // With --subagents, all messages should be present and chronologically ordered
+    let out = world
+        .cmd()
+        .args(["dump", "sess-dump-sort", "--subagents", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+
+    assert!(text.contains("DUMP_SORT_MAIN_EARLY"), "should contain early main message");
+    assert!(text.contains("DUMP_SORT_SUB_PROMPT"), "should contain subagent message");
+    assert!(text.contains("DUMP_SORT_MAIN_LATE"), "should contain late main message");
+
+    // Verify chronological order: early main < subagent < late main
+    let pos_early = text.find("DUMP_SORT_MAIN_EARLY").unwrap();
+    let pos_sub = text.find("DUMP_SORT_SUB_PROMPT").unwrap();
+    let pos_late = text.find("DUMP_SORT_MAIN_LATE").unwrap();
+    assert!(pos_early < pos_sub,
+        "early main message should appear before subagent message in chronological order");
+    assert!(pos_sub < pos_late,
+        "subagent message should appear before late main message in chronological order");
 }
