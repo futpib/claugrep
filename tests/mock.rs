@@ -556,6 +556,29 @@ fn test_no_warning_when_subagents_dir_absent() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// no spurious warnings when a project directory no longer exists (worktrees)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_no_warning_when_project_dir_missing() {
+    let world = MockWorld::new();
+
+    // Point --project at a path whose encoded project dir does not exist in
+    // the mock HOME.  This exercises `discover_sessions` → `try_read_dir` on
+    // a NotFound directory — it should exit cleanly with no warning.
+    let out = world.cmd()
+        .args(["search", "anything", "--project", "/claugrep-mock/gone-worktree"])
+        .output().unwrap();
+    // Exit code is non-zero (no sessions found), but stderr must not contain a warning.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("warning"),
+        "search should not warn about missing project dirs, got: {}",
+        err
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // search — target flags (--targets / -t)
 // ═════════════════════════════════════════════════════════════════════════════
 

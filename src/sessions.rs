@@ -1,6 +1,20 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+
+/// Read a directory, returning `None` silently for `NotFound` (e.g. cleaned-up worktrees)
+/// and logging a warning for other errors.
+fn try_read_dir(path: &Path) -> Option<fs::ReadDir> {
+    match fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!("warning: failed to read directory {}: {}", path.display(), e);
+            None
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SessionFile {
@@ -48,13 +62,9 @@ pub fn project_dir(project_path: &str, config_dir: &Path) -> PathBuf {
 
 fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile> {
     let subagent_dir = project_dir.join(session_id).join("subagents");
-    let entries = match fs::read_dir(&subagent_dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return vec![],
-        Err(e) => {
-            eprintln!("warning: failed to read directory {}: {}", subagent_dir.display(), e);
-            return vec![];
-        }
+    let entries = match try_read_dir(&subagent_dir) {
+        Some(e) => e,
+        None => return vec![],
     };
 
     entries
@@ -184,12 +194,9 @@ pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<Proje
     for (account, config_dir) in config_dirs {
         let projects_root = config_dir.join("projects");
 
-        let entries = match fs::read_dir(&projects_root) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
-                continue;
-            }
+        let entries = match try_read_dir(&projects_root) {
+            Some(e) => e,
+            None => continue,
         };
 
         let mut projects: Vec<ProjectInfo> = entries
@@ -252,24 +259,18 @@ pub fn discover_all_sessions(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<S
     for (_account, config_dir) in config_dirs {
         let projects_root = config_dir.join("projects");
 
-        let entries = match fs::read_dir(&projects_root) {
-            Ok(e) => e,
-            Err(e) => {
-                eprintln!("warning: failed to read directory {}: {}", projects_root.display(), e);
-                continue;
-            }
+        let entries = match try_read_dir(&projects_root) {
+            Some(e) => e,
+            None => continue,
         };
 
         for entry in entries.flatten() {
             if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 let encoded = entry.file_name().to_string_lossy().to_string();
                 let dir = projects_root.join(&encoded);
-                let inner = match fs::read_dir(&dir) {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
-                        continue;
-                    }
+                let inner = match try_read_dir(&dir) {
+                    Some(e) => e,
+                    None => continue,
                 };
                 let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = inner
                     .flatten()
@@ -323,12 +324,9 @@ pub fn discover_all_sessions(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<S
 pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, config_dir: &Path) -> Vec<SessionFile> {
     let dir = project_dir(project_path, config_dir);
 
-    let entries = match fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("warning: failed to read directory {}: {}", dir.display(), e);
-            return vec![];
-        }
+    let entries = match try_read_dir(&dir) {
+        Some(e) => e,
+        None => return vec![],
     };
 
     let jsonl_files: Vec<(String, PathBuf, std::time::SystemTime)> = entries
