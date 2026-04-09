@@ -253,6 +253,8 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::LastPrompt);
     t.insert(Target::AgentName);
     t.insert(Target::CustomTitle);
+    t.insert(Target::PermissionMode);
+    t.insert(Target::Attachment);
     t
 }
 
@@ -278,6 +280,8 @@ fn parse_targets(s: &str) -> HashSet<Target> {
         "last-prompt" => Some(Target::LastPrompt),
         "agent-name" => Some(Target::AgentName),
         "custom-title" => Some(Target::CustomTitle),
+        "permission-mode" => Some(Target::PermissionMode),
+        "attachment" => Some(Target::Attachment),
         other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
     }).collect()
 }

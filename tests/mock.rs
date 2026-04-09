@@ -365,6 +365,69 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a permission-mode record.
+    fn permission_mode(mut self, mode: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "permission-mode",
+            "permissionMode": mode,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write an empty attachment record with the given inner type.
+    /// Used for the "not warned" tests — the record has no searchable content,
+    /// but should still be recognized and silently consumed.
+    fn attachment(mut self, inner_type: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": inner_type,
+                "addedNames": [],
+                "addedLines": [],
+                "removedNames": [],
+            },
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write a `deferred_tools_delta` attachment with the given added/removed
+    /// tool names.
+    fn attachment_tools(mut self, added: &[&str], removed: &[&str]) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "deferred_tools_delta",
+                "addedNames": added,
+                "addedLines": added,
+                "removedNames": removed,
+            },
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write an `mcp_server_delta` attachment with the given added server
+    /// names and corresponding description blocks.
+    fn attachment_mcp(mut self, added: &[&str], blocks: &[&str]) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "attachment",
+            "attachment": {
+                "type": "mcp_server_delta",
+                "addedNames": added,
+                "addedBlocks": blocks,
+                "removedNames": [],
+            },
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -2930,6 +2993,220 @@ fn test_custom_title_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "custom-title records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// permission-mode and attachment records are silently recognized
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_permission_mode_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("pm-nowarn");
+    proj.session("sess-pmw")
+        .permission_mode("bypassPermissions")
+        .user_message("hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "permission-mode records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
+fn test_attachment_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("att-nowarn");
+    proj.session("sess-attw")
+        .attachment("deferred_tools_delta")
+        .attachment("mcp_server_delta")
+        .user_message("hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "attachment records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
+fn test_search_permission_mode() {
+    let world = MockWorld::new();
+    let proj = world.project("pm-search");
+    proj.session("sess-pms")
+        .user_message("hello")
+        .permission_mode("UNIQUE_PM_MODE_XYZ")
+        .assistant_message("hi")
+        .done();
+
+    // -t permission-mode finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_PM_MODE_XYZ", "-t", "permission-mode", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t permission-mode should find permission-mode records");
+
+    // default targets should NOT find permission-mode records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_PM_MODE_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "permission-mode records should not appear in default targets");
+}
+
+#[test]
+fn test_search_permission_mode_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("pm-all");
+    proj.session("sess-pma")
+        .user_message("hello")
+        .permission_mode("UNIQUE_PM_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_PM_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include permission-mode records");
+}
+
+#[test]
+fn test_dump_permission_mode() {
+    let world = MockWorld::new();
+    let proj = world.project("pm-dump");
+    proj.session("sess-pmd")
+        .user_message("hello user")
+        .permission_mode("bypassPermissions")
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "permission-mode", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("bypassPermissions"), "dump should show permission mode value");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_search_attachment_tool_name() {
+    // A deferred_tools_delta attachment adds a distinctively named tool —
+    // searching for that tool name should find the attachment record.
+    let world = MockWorld::new();
+    let proj = world.project("att-search-tool");
+    proj.session("sess-atts")
+        .user_message("hello")
+        .attachment_tools(&["UNIQUE_ATT_TOOL_XYZ"], &[])
+        .assistant_message("hi")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_ATT_TOOL_XYZ", "-t", "attachment", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t attachment should find deferred_tools_delta records by tool name");
+
+    // default targets should NOT find attachment records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_ATT_TOOL_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "attachment records should not appear in default targets");
+}
+
+#[test]
+fn test_search_attachment_mcp_block_prose() {
+    // The most useful searchable content in attachment records is the
+    // `addedBlocks` prose of mcp_server_delta records, which describe MCP
+    // servers and their capabilities.
+    let world = MockWorld::new();
+    let proj = world.project("att-search-mcp");
+    proj.session("sess-attmcp")
+        .user_message("hello")
+        .attachment_mcp(
+            &["Example MCP"],
+            &["## Example MCP\nUNIQUE_MCP_DESCRIPTION_PROSE for recruiting workflows"],
+        )
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_MCP_DESCRIPTION_PROSE", "-t", "attachment", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t attachment should find mcp_server_delta records by addedBlocks content");
+}
+
+#[test]
+fn test_search_attachment_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("att-all");
+    proj.session("sess-atta")
+        .user_message("hello")
+        .attachment_tools(&["UNIQUE_ATT_ALL_NAME"], &[])
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_ATT_ALL_NAME", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include attachment records");
+}
+
+#[test]
+fn test_dump_attachment() {
+    let world = MockWorld::new();
+    let proj = world.project("att-dump");
+    proj.session("sess-attd")
+        .user_message("hello user")
+        .attachment_tools(&["NewTool"], &["OldTool"])
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "attachment", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("NewTool"), "dump should show added tool name");
+    assert!(text.contains("OldTool"), "dump should show removed tool name");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
 }
 
 // ── tail tests ───────────────────────────────────────────────────────────────

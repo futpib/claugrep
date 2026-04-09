@@ -19,6 +19,8 @@ pub enum Target {
     LastPrompt,
     AgentName,
     CustomTitle,
+    PermissionMode,
+    Attachment,
 }
 
 impl Target {
@@ -38,6 +40,8 @@ impl Target {
             Target::LastPrompt => "last-prompt",
             Target::AgentName => "agent-name",
             Target::CustomTitle => "custom-title",
+            Target::PermissionMode => "permission-mode",
+            Target::Attachment => "attachment",
         }
     }
 }
@@ -259,6 +263,36 @@ pub fn extract_from_entry(
                 });
             }
         }
+        Some("permission-mode") => {
+            if targets.contains(&Target::PermissionMode) {
+                let mode = entry["permissionMode"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::PermissionMode,
+                    text: mode.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        Some("attachment") => {
+            if targets.contains(&Target::Attachment) {
+                if let Some(text) = format_attachment(&entry["attachment"]) {
+                    let inner_type = entry["attachment"]["type"].as_str().map(String::from);
+                    out.push(ExtractedContent {
+                        target: Target::Attachment,
+                        text,
+                        tool_name: inner_type,
+                        timestamp: timestamp.to_string(),
+                        session_id: entry_session.to_string(),
+                        edit_diff: None,
+                        raw_entry: None,
+                    });
+                }
+            }
+        }
         _ => {
             let raw = entry.to_string();
             let preview: String = raw.chars().take(120).collect();
@@ -349,6 +383,48 @@ fn extract_user(
             }
         }
     }
+}
+
+/// Render an attachment record's payload as searchable text.
+///
+/// Attachment records describe deltas to the set of deferred tools or MCP
+/// servers available in a session.  The fields that carry useful searchable
+/// content are:
+/// - `addedNames` / `removedNames`: names of tools or MCP servers
+/// - `addedBlocks`: prose describing added MCP servers (only on
+///   `mcp_server_delta` variants)
+///
+/// Returns `None` if the attachment is empty (nothing added or removed),
+/// which lets the caller skip writing a useless record.
+fn format_attachment(attachment: &serde_json::Value) -> Option<String> {
+    let added_names = attachment["addedNames"].as_array();
+    let removed_names = attachment["removedNames"].as_array();
+    let added_blocks = attachment["addedBlocks"].as_array();
+
+    let collect_strs = |arr: Option<&Vec<serde_json::Value>>| -> Vec<String> {
+        arr.map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
+
+    let added = collect_strs(added_names);
+    let removed = collect_strs(removed_names);
+    let blocks = collect_strs(added_blocks);
+
+    if added.is_empty() && removed.is_empty() && blocks.is_empty() {
+        return None;
+    }
+
+    let mut lines = vec![];
+    if !added.is_empty() {
+        lines.push(format!("+ {}", added.join(", ")));
+    }
+    if !removed.is_empty() {
+        lines.push(format!("- {}", removed.join(", ")));
+    }
+    if !blocks.is_empty() {
+        lines.push(blocks.join("\n"));
+    }
+    Some(lines.join("\n"))
 }
 
 fn extract_tool_result_text(block: &serde_json::Value) -> Option<String> {
@@ -485,6 +561,7 @@ mod tests {
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle,
+            Target::PermissionMode, Target::Attachment,
         ].into_iter().collect()
     }
 
@@ -670,5 +747,78 @@ mod tests {
         let targets: HashSet<Target> = [Target::CustomTitle].into_iter().collect();
         let contents = extract_content(f.path(), &targets, "s", false);
         assert_eq!(contents.len(), 1);
+    }
+
+    #[test]
+    fn test_extract_permission_mode() {
+        let f = write_jsonl(&[
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pm = contents.iter().find(|c| c.target == Target::PermissionMode);
+        assert!(pm.is_some(), "should extract permission-mode record");
+        assert_eq!(pm.unwrap().text, "bypassPermissions");
+    }
+
+    #[test]
+    fn test_permission_mode_target_filtering() {
+        // Without PermissionMode in targets, the record should be silently skipped.
+        let f = write_jsonl(&[
+            r#"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::User].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_attachment_deferred_tools_delta() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedNames":["WebFetch","WebSearch"],"addedLines":["WebFetch","WebSearch"],"removedNames":["OldTool"]},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment);
+        assert!(att.is_some(), "should extract attachment record");
+        let att = att.unwrap();
+        assert!(att.text.contains("WebFetch"));
+        assert!(att.text.contains("WebSearch"));
+        assert!(att.text.contains("OldTool"));
+        assert_eq!(att.tool_name.as_deref(), Some("deferred_tools_delta"));
+    }
+
+    #[test]
+    fn test_extract_attachment_mcp_server_delta_with_blocks() {
+        // mcp_server_delta records contain human-readable `addedBlocks` describing
+        // added MCP servers — this is the most useful searchable content.
+        let line = "{\"type\":\"attachment\",\"attachment\":{\"type\":\"mcp_server_delta\",\
+            \"addedNames\":[\"Lever MCP\"],\
+            \"addedBlocks\":[\"## Lever MCP\\nRecruiting tools for Lever\"],\
+            \"removedNames\":[]},\"sessionId\":\"s\"}";
+        let f = write_jsonl(&[line]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert!(att.text.contains("Lever MCP"));
+        assert!(att.text.contains("Recruiting tools"),
+            "attachment text should include addedBlocks prose for searching");
+    }
+
+    #[test]
+    fn test_extract_attachment_empty_payload_is_skipped() {
+        // An attachment with nothing added or removed produces no ExtractedContent.
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedNames":[],"addedLines":[],"removedNames":[]},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        assert_eq!(contents.len(), 0, "empty attachment should be skipped, not extracted");
+    }
+
+    #[test]
+    fn test_attachment_target_filtering() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta","addedNames":["WebFetch"],"addedLines":["WebFetch"],"removedNames":[]},"sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::User].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 0);
     }
 }
