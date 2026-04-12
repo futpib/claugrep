@@ -57,6 +57,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Search Claude Code conversation transcripts
+    #[command(alias = "s")]
     Search {
         /// Pattern to search (literal string and/or regex)
         pattern: String,

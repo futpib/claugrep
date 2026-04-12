@@ -3810,3 +3810,22 @@ fn test_dump_sorts_by_timestamp_across_subagents() {
     assert!(pos_sub < pos_late,
         "subagent message should appear before late main message in chronological order");
 }
+
+#[test]
+fn test_search_alias_s() {
+    let world = MockWorld::new();
+    let proj = world.project("alias-s");
+    proj.session("sess-alias-s")
+        .user_message("ALIAS_S_NEEDLE")
+        .done();
+
+    // "s" alias should behave identically to "search"
+    let out = world
+        .cmd()
+        .args(["s", "ALIAS_S_NEEDLE", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!strip_ansi(stdout(&out)).contains("No matches found"));
+    assert!(strip_ansi(stdout(&out)).contains("ALIAS_S_NEEDLE"));
+}
