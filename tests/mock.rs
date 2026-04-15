@@ -171,6 +171,18 @@ impl SessionBuilder {
         self
     }
 
+    fn thinking(mut self, text: &str) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": text}]},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     /// Write a Bash tool-use + tool-result pair (bash-command + bash-output).
     fn bash(mut self, cmd: &str, output: &str) -> Self {
         self.tool_counter += 1;
@@ -3876,4 +3888,151 @@ fn test_search_alias_s() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     assert!(!strip_ansi(stdout(&out)).contains("No matches found"));
     assert!(strip_ansi(stdout(&out)).contains("ALIAS_S_NEEDLE"));
+}
+
+// `console::style(_).dim()` emits `\x1b[2m` as the opening escape.  Both
+// `dump` and `tail` wrap their `[target]` / `[target:tool]` labels in dim
+// so they fade next to the content; tests pass `--color=always` since stdout
+// is piped (which would otherwise disable colors).
+#[test]
+fn test_dump_label_is_dim_with_color_always() {
+    let world = MockWorld::new();
+    let proj = world.project("dim-label-dump");
+    proj.session("sess-dim-d")
+        .thinking("THINK_DUMP_PAYLOAD")
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "--color=always",
+            "dump", "--targets", "thinking", "--project", proj.path(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("\x1b[2m[thinking]"),
+        "expected dim ANSI sequence wrapping [thinking] label, got: {:?}", raw);
+    // Content itself should not be wrapped in dim.
+    assert!(raw.contains("THINK_DUMP_PAYLOAD"),
+        "payload text should appear in output");
+}
+
+#[test]
+fn test_tail_label_is_dim_with_color_always() {
+    let world = MockWorld::new();
+    let proj = world.project("dim-label-tail");
+    proj.session("sess-dim-t")
+        .thinking("THINK_TAIL_PAYLOAD")
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "--color=always",
+            "tail", "--targets", "thinking", "--project", proj.path(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("\x1b[2m[thinking]"),
+        "expected dim ANSI sequence wrapping [thinking] label, got: {:?}", raw);
+}
+
+// For multi-line content (file reads, stdout, etc.) the label should sit on
+// its own line so the first line of content isn't crammed next to it.
+#[test]
+fn test_dump_multiline_content_starts_on_new_line() {
+    let world = MockWorld::new();
+    let proj = world.project("multiline-dump");
+    proj.session("sess-ml-d")
+        .bash("cat file", "ML_LINE_1\nML_LINE_2\nML_LINE_3")
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "dump", "--targets", "bash-output", "--project", proj.path(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[bash-output:Bash]\nML_LINE_1"),
+        "label should be on its own line before multi-line content, got: {:?}", text);
+}
+
+#[test]
+fn test_tail_multiline_content_starts_on_new_line() {
+    let world = MockWorld::new();
+    let proj = world.project("multiline-tail");
+    proj.session("sess-ml-t")
+        .bash("cat file", "ML_LINE_A\nML_LINE_B")
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "tail", "--targets", "bash-output", "--project", proj.path(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[bash-output:Bash]\nML_LINE_A"),
+        "label should be on its own line before multi-line content, got: {:?}", text);
+}
+
+// Single-line content keeps the label on the same line (unchanged behaviour).
+#[test]
+fn test_dump_singleline_content_stays_on_same_line() {
+    let world = MockWorld::new();
+    let proj = world.project("singleline-dump");
+    proj.session("sess-sl-d")
+        .user_message("SINGLE_LINE_MSG")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "--targets", "user", "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[user] SINGLE_LINE_MSG"),
+        "single-line content should stay on the label line, got: {:?}", text);
+}
+
+// With `--color=never`, no ANSI codes should appear at all — the label
+// should be plain `[thinking]`.
+#[test]
+fn test_dump_label_plain_with_color_never() {
+    let world = MockWorld::new();
+    let proj = world.project("plain-label-dump");
+    proj.session("sess-plain-d")
+        .thinking("THINK_PLAIN_PAYLOAD")
+        .done();
+
+    let out = world
+        .cmd()
+        .args([
+            "--color=never",
+            "dump", "--targets", "thinking", "--project", proj.path(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(!raw.contains("\x1b["),
+        "expected no ANSI codes with --color=never, got: {:?}", raw);
+    assert!(raw.contains("[thinking]"),
+        "expected literal [thinking] label, got: {:?}", raw);
 }

@@ -431,6 +431,28 @@ fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<S
     all
 }
 
+fn print_dump_record(content: &parser::ExtractedContent, json: bool, no_diff: bool) {
+    if json {
+        if let Some(ref raw) = content.raw_entry {
+            println!("{}", raw);
+        }
+        return;
+    }
+    let label = match &content.tool_name {
+        Some(t) => format!("[{}:{}]", content.target.as_str(), t),
+        None => format!("[{}]", content.target.as_str()),
+    };
+    let label = console::style(label).dim();
+    if !no_diff {
+        if let Some(ref diff) = content.edit_diff {
+            println!("{}\n{}", label, format_edit_diff(diff));
+            return;
+        }
+    }
+    let sep = if content.text.contains('\n') { "\n" } else { " " };
+    println!("{}{}{}", label, sep, content.text);
+}
+
 fn main() {
     // Reset SIGPIPE to default so that writing to a closed pipe (e.g. `claugrep | head`)
     // causes the kernel to kill the process cleanly instead of Rust's panic handler firing.
@@ -1003,23 +1025,7 @@ fn main() {
             all_contents.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
             for content in &all_contents {
-                if json {
-                    if let Some(ref raw) = content.raw_entry {
-                        println!("{}", raw);
-                    }
-                    continue;
-                }
-                let label = match &content.tool_name {
-                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
-                    None => format!("[{}]", content.target.as_str()),
-                };
-                if !no_diff {
-                    if let Some(ref diff) = content.edit_diff {
-                        println!("{}\n{}", label, format_edit_diff(diff));
-                        continue;
-                    }
-                }
-                println!("{} {}", label, content.text);
+                print_dump_record(content, json, no_diff);
             }
         }
 
@@ -1048,23 +1054,7 @@ fn main() {
             }
 
             let print_content = |content: &parser::ExtractedContent| {
-                if json {
-                    if let Some(ref raw) = content.raw_entry {
-                        println!("{}", raw);
-                    }
-                    return;
-                }
-                let label = match &content.tool_name {
-                    Some(t) => format!("[{}:{}]", content.target.as_str(), t),
-                    None => format!("[{}]", content.target.as_str()),
-                };
-                if !no_diff {
-                    if let Some(ref diff) = content.edit_diff {
-                        println!("{}\n{}", label, format_edit_diff(diff));
-                        return;
-                    }
-                }
-                println!("{} {}", label, content.text);
+                print_dump_record(content, json, no_diff);
             };
 
             let mut all_contents = vec![];
