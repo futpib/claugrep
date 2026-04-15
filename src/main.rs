@@ -62,7 +62,7 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Content types to include (comma-separated: user,assistant,thinking,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt; or "default" for standard types, "all" for everything including internals)
+        /// Content types to include (comma-separated: user,assistant,thinking,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt,agent-name,custom-title,permission-mode,attachment,progress; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
@@ -256,36 +256,39 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::CustomTitle);
     t.insert(Target::PermissionMode);
     t.insert(Target::Attachment);
+    t.insert(Target::Progress);
     t
 }
 
 fn parse_targets(s: &str) -> HashSet<Target> {
-    if s.trim() == "default" {
-        return default_targets();
+    let mut out: HashSet<Target> = HashSet::new();
+    for tok in s.split(',') {
+        match tok.trim() {
+            "" => continue,
+            "default" => out.extend(default_targets()),
+            "all" => out.extend(all_targets()),
+            "user" => { out.insert(Target::User); }
+            "assistant" => { out.insert(Target::Assistant); }
+            "thinking" => { out.insert(Target::Thinking); }
+            "bash-command" => { out.insert(Target::BashCommand); }
+            "bash-output" => { out.insert(Target::BashOutput); }
+            "tool-use" => { out.insert(Target::ToolUse); }
+            "tool-result" => { out.insert(Target::ToolResult); }
+            "subagent-prompt" => { out.insert(Target::SubagentPrompt); }
+            "compact-summary" => { out.insert(Target::CompactSummary); }
+            "system" => { out.insert(Target::System); }
+            "file-history-snapshot" => { out.insert(Target::FileHistorySnapshot); }
+            "queue-operation" => { out.insert(Target::QueueOperation); }
+            "last-prompt" => { out.insert(Target::LastPrompt); }
+            "agent-name" => { out.insert(Target::AgentName); }
+            "custom-title" => { out.insert(Target::CustomTitle); }
+            "permission-mode" => { out.insert(Target::PermissionMode); }
+            "attachment" => { out.insert(Target::Attachment); }
+            "progress" => { out.insert(Target::Progress); }
+            other => eprintln!("warning: unknown target '{}', ignoring", other),
+        }
     }
-    if s.trim() == "all" {
-        return all_targets();
-    }
-    s.split(',').filter_map(|t| match t.trim() {
-        "user" => Some(Target::User),
-        "assistant" => Some(Target::Assistant),
-        "thinking" => Some(Target::Thinking),
-        "bash-command" => Some(Target::BashCommand),
-        "bash-output" => Some(Target::BashOutput),
-        "tool-use" => Some(Target::ToolUse),
-        "tool-result" => Some(Target::ToolResult),
-        "subagent-prompt" => Some(Target::SubagentPrompt),
-        "compact-summary" => Some(Target::CompactSummary),
-        "system" => Some(Target::System),
-        "file-history-snapshot" => Some(Target::FileHistorySnapshot),
-        "queue-operation" => Some(Target::QueueOperation),
-        "last-prompt" => Some(Target::LastPrompt),
-        "agent-name" => Some(Target::AgentName),
-        "custom-title" => Some(Target::CustomTitle),
-        "permission-mode" => Some(Target::PermissionMode),
-        "attachment" => Some(Target::Attachment),
-        other => { eprintln!("warning: unknown target '{}', ignoring", other); None }
-    }).collect()
+    out
 }
 
 fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {

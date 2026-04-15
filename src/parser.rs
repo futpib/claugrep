@@ -22,6 +22,7 @@ pub enum Target {
     CustomTitle,
     PermissionMode,
     Attachment,
+    Progress,
 }
 
 impl Target {
@@ -44,6 +45,7 @@ impl Target {
             Target::CustomTitle => "custom-title",
             Target::PermissionMode => "permission-mode",
             Target::Attachment => "attachment",
+            Target::Progress => "progress",
         }
     }
 }
@@ -154,18 +156,7 @@ pub fn extract_from_entry(
         Some("user") => extract_user(entry, tool_use_map, targets, entry_session, &timestamp, is_subagent, out),
         Some("assistant") => extract_assistant(entry, targets, entry_session, &timestamp, out),
         Some("progress") => {
-            // Synthesize nested entry
-            let nested_type = entry["data"]["message"]["type"].as_str();
-            if let Some(inner_msg) = entry["data"]["message"]["message"].as_object() {
-                let synth_type = if nested_type == Some("assistant") { "assistant" } else { "user" };
-                let synth = serde_json::json!({
-                    "type": synth_type,
-                    "message": inner_msg,
-                    "timestamp": timestamp,
-                    "sessionId": entry_session,
-                });
-                extract_from_entry(&synth, tool_use_map, targets, session_id, is_subagent, out);
-            }
+            extract_progress(entry, tool_use_map, targets, session_id, entry_session, &timestamp, is_subagent, out);
         }
         Some("file-history-snapshot") => {
             if targets.contains(&Target::FileHistorySnapshot) {
@@ -324,8 +315,8 @@ fn extract_user(
         if targets.contains(&Target::User) { Some(Target::User) } else { None }
     };
 
-    if let Some(target) = user_target {
-        if let Some(text) = content.as_str() {
+    if let Some(text) = content.as_str() {
+        if let Some(target) = user_target {
             out.push(ExtractedContent {
                 target,
                 text: text.to_string(),
@@ -335,12 +326,23 @@ fn extract_user(
                 edit_diff: None,
                 raw_entry: None,
             });
-        } else if let Some(arr) = content.as_array() {
-            for block in arr {
-                if block["type"] == "text" {
+        }
+        return;
+    }
+
+    let arr = match content.as_array() {
+        Some(a) => a,
+        None => return,
+    };
+
+    for block in arr {
+        let blk_type = block["type"].as_str().unwrap_or("");
+        match blk_type {
+            "text" => {
+                if let Some(target) = user_target.clone() {
                     if let Some(text) = block["text"].as_str() {
                         out.push(ExtractedContent {
-                            target: target.clone(),
+                            target,
                             text: text.to_string(),
                             tool_name: None,
                             timestamp: timestamp.to_string(),
@@ -351,37 +353,33 @@ fn extract_user(
                     }
                 }
             }
-        }
-    }
+            "tool_result" => {
+                let tool_use_id = match block["tool_use_id"].as_str() {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let tool_name = tool_use_map.get(tool_use_id).cloned().unwrap_or_default();
+                let is_bash = tool_name == "Bash";
+                let target = if is_bash { Target::BashOutput } else { Target::ToolResult };
 
-    // Tool results
-    if let Some(arr) = content.as_array() {
-        for block in arr {
-            if block["type"] != "tool_result" {
-                continue;
+                if !targets.contains(&target) {
+                    continue;
+                }
+
+                if let Some(text) = extract_tool_result_text(block) {
+                    out.push(ExtractedContent {
+                        target,
+                        text,
+                        tool_name: Some(tool_name),
+                        timestamp: timestamp.to_string(),
+                        session_id: session_id.to_string(),
+                        edit_diff: None,
+                        raw_entry: None,
+                    });
+                }
             }
-            let tool_use_id = match block["tool_use_id"].as_str() {
-                Some(id) => id,
-                None => continue,
-            };
-            let tool_name = tool_use_map.get(tool_use_id).cloned().unwrap_or_default();
-            let is_bash = tool_name == "Bash";
-            let target = if is_bash { Target::BashOutput } else { Target::ToolResult };
-
-            if !targets.contains(&target) {
-                continue;
-            }
-
-            if let Some(text) = extract_tool_result_text(block) {
-                out.push(ExtractedContent {
-                    target,
-                    text,
-                    tool_name: Some(tool_name),
-                    timestamp: timestamp.to_string(),
-                    session_id: session_id.to_string(),
-                    edit_diff: None,
-                    raw_entry: None,
-                });
+            other => {
+                eprintln!("warning: skipping unrecognized user content block type '{}'", other);
             }
         }
     }
@@ -389,28 +387,75 @@ fn extract_user(
 
 /// Render an attachment record's payload as searchable text.
 ///
-/// Attachment records describe deltas to the set of deferred tools or MCP
-/// servers available in a session.  The fields that carry useful searchable
-/// content are:
-/// - `addedNames` / `removedNames`: names of tools or MCP servers
-/// - `addedBlocks`: prose describing added MCP servers (only on
-///   `mcp_server_delta` variants)
-///
-/// Returns `None` if the attachment is empty (nothing added or removed),
-/// which lets the caller skip writing a useless record.
+/// Dispatches on the attachment's inner `type`.  Unknown subtypes emit a
+/// warning and fall back to the raw JSON so nothing is silently dropped.
 fn format_attachment(attachment: &serde_json::Value) -> Option<String> {
-    let added_names = attachment["addedNames"].as_array();
-    let removed_names = attachment["removedNames"].as_array();
-    let added_blocks = attachment["addedBlocks"].as_array();
+    let subtype = attachment["type"].as_str().unwrap_or("");
+    match subtype {
+        "deferred_tools_delta" | "mcp_server_delta" => format_attachment_delta(attachment),
+        "task_reminder" | "skill_listing" => {
+            attachment["content"].as_str().filter(|s| !s.is_empty()).map(String::from)
+        }
+        "queued_command" => {
+            attachment["prompt"].as_str().filter(|s| !s.is_empty()).map(String::from)
+        }
+        "edited_text_file" => {
+            let filename = attachment["filename"].as_str().unwrap_or("");
+            let snippet = attachment["snippet"].as_str().unwrap_or("");
+            if filename.is_empty() && snippet.is_empty() { None }
+            else if snippet.is_empty() { Some(filename.to_string()) }
+            else { Some(format!("{}\n{}", filename, snippet)) }
+        }
+        "file" => {
+            let filename = attachment["filename"].as_str()
+                .or_else(|| attachment["displayPath"].as_str())
+                .unwrap_or("");
+            let content = attachment["content"].as_str().unwrap_or("");
+            if filename.is_empty() && content.is_empty() { None }
+            else if content.is_empty() { Some(filename.to_string()) }
+            else { Some(format!("{}\n{}", filename, content)) }
+        }
+        "hook_success" | "hook_cancelled" => {
+            let hook_name = attachment["hookName"].as_str().unwrap_or("");
+            let command = attachment["command"].as_str().unwrap_or("");
+            let stdout = attachment["stdout"].as_str().unwrap_or("");
+            let stderr = attachment["stderr"].as_str().unwrap_or("");
+            let mut lines = vec![];
+            if !hook_name.is_empty() || !command.is_empty() {
+                lines.push(format!("{}: {}", hook_name, command));
+            }
+            if !stdout.is_empty() { lines.push(stdout.to_string()); }
+            if !stderr.is_empty() { lines.push(stderr.to_string()); }
+            if lines.is_empty() { None } else { Some(lines.join("\n")) }
+        }
+        "date_change" => {
+            attachment["newDate"].as_str().filter(|s| !s.is_empty()).map(String::from)
+        }
+        "compact_file_reference" => {
+            attachment["displayPath"].as_str()
+                .or_else(|| attachment["filename"].as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        }
+        _ => {
+            eprintln!("warning: skipping unrecognized attachment subtype '{}'", subtype);
+            Some(attachment.to_string())
+        }
+    }
+}
 
+/// Format a `deferred_tools_delta` or `mcp_server_delta` attachment.
+///
+/// Returns `None` when the delta has nothing added or removed.
+fn format_attachment_delta(attachment: &serde_json::Value) -> Option<String> {
     let collect_strs = |arr: Option<&Vec<serde_json::Value>>| -> Vec<String> {
         arr.map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
             .unwrap_or_default()
     };
 
-    let added = collect_strs(added_names);
-    let removed = collect_strs(removed_names);
-    let blocks = collect_strs(added_blocks);
+    let added = collect_strs(attachment["addedNames"].as_array());
+    let removed = collect_strs(attachment["removedNames"].as_array());
+    let blocks = collect_strs(attachment["addedBlocks"].as_array());
 
     if added.is_empty() && removed.is_empty() && blocks.is_empty() {
         return None;
@@ -466,6 +511,82 @@ fn format_tool_input(input: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+fn extract_progress(
+    entry: &serde_json::Value,
+    tool_use_map: &ToolUseMap,
+    targets: &std::collections::HashSet<Target>,
+    session_id: &str,
+    entry_session: &str,
+    timestamp: &str,
+    is_subagent: bool,
+    out: &mut Vec<ExtractedContent>,
+) {
+    let data = &entry["data"];
+    let subtype = data["type"].as_str().unwrap_or("");
+
+    // agent_progress wraps a full nested assistant/user message — synthesize
+    // a top-level entry so all normal extraction rules (text, thinking,
+    // tool_use, tool_result) apply to it.
+    if subtype == "agent_progress" {
+        if let Some(inner_msg) = data["message"]["message"].as_object() {
+            let nested_type = data["message"]["type"].as_str();
+            let synth_type = if nested_type == Some("assistant") { "assistant" } else { "user" };
+            let synth = serde_json::json!({
+                "type": synth_type,
+                "message": inner_msg,
+                "timestamp": timestamp,
+                "sessionId": entry_session,
+            });
+            extract_from_entry(&synth, tool_use_map, targets, session_id, is_subagent, out);
+        }
+        return;
+    }
+
+    if !targets.contains(&Target::Progress) {
+        return;
+    }
+
+    let text = match subtype {
+        "hook_progress" => {
+            let hook_name = data["hookName"].as_str().unwrap_or("");
+            let command = data["command"].as_str().unwrap_or("");
+            format!("{}: {}", hook_name, command)
+        }
+        "bash_progress" => {
+            data["fullOutput"].as_str()
+                .or_else(|| data["output"].as_str())
+                .unwrap_or("").to_string()
+        }
+        "query_update" => {
+            data["query"].as_str().unwrap_or("").to_string()
+        }
+        "search_results_received" => {
+            let query = data["query"].as_str().unwrap_or("");
+            let count = data["resultCount"].as_u64().unwrap_or(0);
+            format!("{} ({} results)", query, count)
+        }
+        "waiting_for_task" => {
+            let desc = data["taskDescription"].as_str().unwrap_or("");
+            let task_type = data["taskType"].as_str().unwrap_or("");
+            format!("{}: {}", task_type, desc)
+        }
+        other => {
+            eprintln!("warning: skipping unrecognized progress subtype '{}'", other);
+            data.to_string()
+        }
+    };
+
+    out.push(ExtractedContent {
+        target: Target::Progress,
+        text,
+        tool_name: Some(subtype.to_string()),
+        timestamp: timestamp.to_string(),
+        session_id: entry_session.to_string(),
+        edit_diff: None,
+        raw_entry: None,
+    });
+}
+
 fn extract_assistant(
     entry: &serde_json::Value,
     targets: &std::collections::HashSet<Target>,
@@ -479,6 +600,14 @@ fn extract_assistant(
     };
 
     for block in content {
+        let blk_type = block["type"].as_str().unwrap_or("");
+        match blk_type {
+            "text" | "thinking" | "tool_use" => {}
+            other => {
+                eprintln!("warning: skipping unrecognized assistant content block type '{}'", other);
+            }
+        }
+
         if block["type"] == "text" && targets.contains(&Target::Assistant) {
             if let Some(text) = block["text"].as_str() {
                 out.push(ExtractedContent {
@@ -577,7 +706,7 @@ mod tests {
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle,
-            Target::PermissionMode, Target::Attachment,
+            Target::PermissionMode, Target::Attachment, Target::Progress,
         ].into_iter().collect()
     }
 
@@ -860,5 +989,159 @@ mod tests {
         let targets: HashSet<Target> = [Target::User].into_iter().collect();
         let contents = extract_content(f.path(), &targets, "s", false);
         assert_eq!(contents.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_attachment_task_reminder() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"task_reminder","content":"don't forget the thing","itemCount":1},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert_eq!(att.text, "don't forget the thing");
+        assert_eq!(att.tool_name.as_deref(), Some("task_reminder"));
+    }
+
+    #[test]
+    fn test_extract_attachment_queued_command() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"run tests","commandMode":"prompt"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert_eq!(att.text, "run tests");
+    }
+
+    #[test]
+    fn test_extract_attachment_edited_text_file() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"edited_text_file","filename":"src/foo.rs","snippet":"fn bar() {}"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert!(att.text.contains("src/foo.rs"));
+        assert!(att.text.contains("fn bar() {}"));
+    }
+
+    #[test]
+    fn test_extract_attachment_file() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"file","filename":"README.md","displayPath":"./README.md","content":"hello"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert!(att.text.contains("README.md"));
+        assert!(att.text.contains("hello"));
+    }
+
+    #[test]
+    fn test_extract_attachment_hook_success() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"hook_success","hookName":"pre-tool","command":"lint","stdout":"ok","stderr":"","exitCode":0,"durationMs":10,"hookEvent":"PreToolUse","toolUseID":"tu"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert!(att.text.contains("pre-tool"));
+        assert!(att.text.contains("lint"));
+        assert!(att.text.contains("ok"));
+    }
+
+    #[test]
+    fn test_extract_attachment_date_change() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"date_change","newDate":"2026-04-15"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert_eq!(att.text, "2026-04-15");
+    }
+
+    #[test]
+    fn test_extract_attachment_compact_file_reference() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"compact_file_reference","displayPath":"./foo.rs","filename":"foo.rs"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment).unwrap();
+        assert_eq!(att.text, "./foo.rs");
+    }
+
+    #[test]
+    fn test_unknown_attachment_subtype_is_not_silently_dropped() {
+        let f = write_jsonl(&[
+            r#"{"type":"attachment","attachment":{"type":"totally_new_subtype","payload":"UNIQUE_UNKNOWN_ATT"},"sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let att = contents.iter().find(|c| c.target == Target::Attachment)
+            .expect("unknown attachment subtype should still produce an ExtractedContent");
+        assert!(att.text.contains("UNIQUE_UNKNOWN_ATT"),
+            "unknown attachment payload should be preserved in output");
+    }
+
+    #[test]
+    fn test_unknown_assistant_block_type_is_not_silently_dropped() {
+        // Known block types in assistant.content are text, thinking, tool_use.
+        // An unrecognized subtype must not crash extraction and should let other
+        // blocks still be extracted.
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"new_future_block","data":"x"},{"type":"text","text":"hello"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let txt = contents.iter().find(|c| c.target == Target::Assistant).unwrap();
+        assert_eq!(txt.text, "hello");
+    }
+
+    #[test]
+    fn test_unknown_user_block_type_is_not_silently_dropped() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"new_future_block","data":"x"},{"type":"text","text":"hi"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let txt = contents.iter().find(|c| c.target == Target::User).unwrap();
+        assert_eq!(txt.text, "hi");
+    }
+
+    #[test]
+    fn test_extract_progress_hook() {
+        let f = write_jsonl(&[
+            r#"{"type":"progress","data":{"type":"hook_progress","hookEvent":"PreToolUse","hookName":"PreToolUse:Bash","command":"/usr/bin/hook"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pg = contents.iter().find(|c| c.target == Target::Progress).unwrap();
+        assert!(pg.text.contains("PreToolUse:Bash"));
+        assert!(pg.text.contains("/usr/bin/hook"));
+        assert_eq!(pg.tool_name.as_deref(), Some("hook_progress"));
+    }
+
+    #[test]
+    fn test_extract_progress_bash() {
+        let f = write_jsonl(&[
+            r#"{"type":"progress","data":{"type":"bash_progress","fullOutput":"UNIQUE_BASH_OUT","output":"trunc","taskId":"x"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pg = contents.iter().find(|c| c.target == Target::Progress).unwrap();
+        assert_eq!(pg.text, "UNIQUE_BASH_OUT");
+    }
+
+    #[test]
+    fn test_extract_progress_agent_still_nests() {
+        // agent_progress records wrap a nested assistant/user message — the extractor
+        // must still recurse into them so the inner text/tool_use is captured.
+        let f = write_jsonl(&[
+            r#"{"type":"progress","data":{"type":"agent_progress","agentId":"a1","message":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"NESTED_AGENT_MSG"}]}}},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let msg = contents.iter().find(|c| c.target == Target::Assistant).unwrap();
+        assert_eq!(msg.text, "NESTED_AGENT_MSG");
+    }
+
+    #[test]
+    fn test_unknown_progress_subtype_is_not_silently_dropped() {
+        let f = write_jsonl(&[
+            r#"{"type":"progress","data":{"type":"totally_new_progress","payload":"UNIQUE_UNKNOWN_PROG"},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pg = contents.iter().find(|c| c.target == Target::Progress).unwrap();
+        assert!(pg.text.contains("UNIQUE_UNKNOWN_PROG"));
     }
 }

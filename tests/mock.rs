@@ -859,6 +859,48 @@ fn test_search_targets_comma_separated() {
 }
 
 #[test]
+fn test_search_targets_default_plus_extra() {
+    // `-t default,progress` should mean "the default target set PLUS progress" —
+    // i.e. comma composition works alongside the "default" / "all" shortcuts.
+    let world = MockWorld::new();
+    let proj = world.project("targets-default-plus");
+
+    // Write a session with a default-covered record (user) + a progress record
+    // that is normally excluded from `default`.
+    proj.session("sess-dp").user_message("USER_DP_DEFAULT").done();
+    let session_path = proj.session_path("sess-dp");
+    let mut f = fs::OpenOptions::new().append(true).open(&session_path).unwrap();
+    writeln!(
+        f,
+        r#"{{"type":"progress","data":{{"type":"hook_progress","hookEvent":"PreToolUse","hookName":"UNIQUE_DP_HOOK","command":"run"}},"timestamp":"2024-01-01T00:00:02Z","sessionId":"sess-dp"}}"#
+    ).unwrap();
+    drop(f);
+
+    // `default` alone: finds user, misses progress
+    let def_only = world
+        .cmd()
+        .args(["search", "DP_", "-t", "default", "--project", proj.path()])
+        .output().unwrap();
+    assert!(def_only.status.success());
+    let def_text = strip_ansi(stdout(&def_only));
+    assert!(def_text.contains("USER_DP_DEFAULT"), "default should find user messages");
+    assert!(!def_text.contains("UNIQUE_DP_HOOK"),
+        "default should not include progress, got: {}", def_text);
+
+    // `default,progress`: finds both
+    let combined = world
+        .cmd()
+        .args(["search", "DP_", "-t", "default,progress", "--project", proj.path()])
+        .output().unwrap();
+    assert!(combined.status.success(), "stderr: {}", String::from_utf8_lossy(&combined.stderr));
+    let combined_text = strip_ansi(stdout(&combined));
+    assert!(combined_text.contains("USER_DP_DEFAULT"),
+        "default,progress should still include user messages");
+    assert!(combined_text.contains("UNIQUE_DP_HOOK"),
+        "default,progress should include progress records");
+}
+
+#[test]
 fn test_dump_targets_shorthand() {
     let world = MockWorld::new();
     let proj = world.project("dump-t-short");
