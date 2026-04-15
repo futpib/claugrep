@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub enum Target {
     User,
     Assistant,
+    Thinking,
     BashCommand,
     BashOutput,
     ToolUse,
@@ -28,6 +29,7 @@ impl Target {
         match self {
             Target::User => "user",
             Target::Assistant => "assistant",
+            Target::Thinking => "thinking",
             Target::BashCommand => "bash-command",
             Target::BashOutput => "bash-output",
             Target::ToolUse => "tool-use",
@@ -491,6 +493,20 @@ fn extract_assistant(
             }
         }
 
+        if block["type"] == "thinking" && targets.contains(&Target::Thinking) {
+            if let Some(text) = block["thinking"].as_str() {
+                out.push(ExtractedContent {
+                    target: Target::Thinking,
+                    text: text.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+
         if block["type"] == "tool_use" {
             let name = block["name"].as_str().unwrap_or("").to_string();
             let input = &block["input"];
@@ -557,7 +573,7 @@ mod tests {
 
     fn all_targets() -> HashSet<Target> {
         [
-            Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
+            Target::User, Target::Assistant, Target::Thinking, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle,
@@ -584,6 +600,30 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].text, "hi there");
+        assert_eq!(contents[0].target, Target::Assistant);
+    }
+
+    #[test]
+    fn test_extract_assistant_thinking() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering"},{"type":"text","text":"answer"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let thinking = contents.iter().find(|c| c.target == Target::Thinking);
+        assert!(thinking.is_some());
+        assert_eq!(thinking.unwrap().text, "pondering");
+        let text = contents.iter().find(|c| c.target == Target::Assistant);
+        assert_eq!(text.unwrap().text, "answer");
+    }
+
+    #[test]
+    fn test_thinking_target_filter_excludes_thinking() {
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"pondering"},{"type":"text","text":"answer"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::Assistant].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::Assistant);
     }
 

@@ -62,7 +62,7 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Content types to include (comma-separated: user,assistant,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt; or "default" for standard types, "all" for everything including internals)
+        /// Content types to include (comma-separated: user,assistant,thinking,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt; or "default" for standard types, "all" for everything including internals)
         #[arg(short = 't', long, default_value = "default")]
         targets: String,
 
@@ -241,7 +241,7 @@ enum Commands {
 
 fn default_targets() -> HashSet<Target> {
     [
-        Target::User, Target::Assistant, Target::BashCommand, Target::BashOutput,
+        Target::User, Target::Assistant, Target::Thinking, Target::BashCommand, Target::BashOutput,
         Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
         Target::QueueOperation,
     ].into_iter().collect()
@@ -269,6 +269,7 @@ fn parse_targets(s: &str) -> HashSet<Target> {
     s.split(',').filter_map(|t| match t.trim() {
         "user" => Some(Target::User),
         "assistant" => Some(Target::Assistant),
+        "thinking" => Some(Target::Thinking),
         "bash-command" => Some(Target::BashCommand),
         "bash-output" => Some(Target::BashOutput),
         "tool-use" => Some(Target::ToolUse),
