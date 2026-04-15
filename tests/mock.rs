@@ -1343,6 +1343,12 @@ fn test_dump_no_session_defaults_to_latest() {
         .user_message("DUMP_DEFAULT_NEWER")
         .done();
 
+    // Stagger mtimes explicitly: on some filesystems sequential writes can share
+    // a single mtime tick, which makes session-order resolution ambiguous.
+    let now = SystemTime::now();
+    set_mtime(&proj.session_path("sess-older"), now - Duration::from_secs(10));
+    set_mtime(&proj.session_path("sess-newer"), now);
+
     let out = world
         .cmd()
         .args(["dump", "--project", proj.path()])
