@@ -330,6 +330,11 @@ pub fn format_summary(count: usize, project_path: &str, session_count: usize) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// `console::set_colors_enabled` is a process-global switch; tests that
+    /// flip it race with each other when run in parallel.  Serialise them.
+    static COLORS_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_format_timestamp_iso() {
@@ -351,6 +356,7 @@ mod tests {
         //
         // The fix: collect all match spans first, then render in one pass so that
         // already-emitted ANSI codes are never re-matched.
+        let _guard = COLORS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         console::set_colors_enabled(true);
         let pat = regex::Regex::new(r".").unwrap(); // matches every char
         let line = "hello.world"; // 11 chars
@@ -507,6 +513,7 @@ mod tests {
 
     #[test]
     fn test_color_tty_vs_piped() {
+        let _guard = COLORS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let diff = crate::parser::EditDiff {
             file_path: "test.rs".to_string(),
             old_string: "old content".to_string(),
