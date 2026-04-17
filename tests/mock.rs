@@ -440,6 +440,24 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a user message whose content is a single image block — e.g. a
+    /// pasted screenshot. Images surface as a short `[image: ...]` marker in
+    /// extracted output rather than triggering an unrecognized-block warning.
+    fn user_image(mut self) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
+            }]},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -3098,6 +3116,33 @@ fn test_attachment_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "attachment records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
+fn test_image_block_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("img-nowarn");
+    proj.session("sess-imgw")
+        .user_image()
+        .user_message("UNIQUE_TEXT_AFTER_IMAGE")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("unrecognized user content block type 'image'"),
+        "image content blocks should not trigger unrecognized block warnings, got: {}", err);
+    // The image should surface as a searchable placeholder marker, and the
+    // sibling text message must still come through untouched.
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[image: image/png"),
+        "dump should show an image placeholder marker, got: {}", text);
+    assert!(text.contains("UNIQUE_TEXT_AFTER_IMAGE"),
+        "text messages in the same session should still be extracted");
 }
 
 #[test]
