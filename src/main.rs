@@ -257,6 +257,7 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::PermissionMode);
     t.insert(Target::Attachment);
     t.insert(Target::Progress);
+    t.insert(Target::PullRequest);
     t
 }
 
@@ -285,6 +286,7 @@ fn parse_targets(s: &str) -> HashSet<Target> {
             "permission-mode" => { out.insert(Target::PermissionMode); }
             "attachment" => { out.insert(Target::Attachment); }
             "progress" => { out.insert(Target::Progress); }
+            "pull-request" => { out.insert(Target::PullRequest); }
             other => eprintln!("warning: unknown target '{}', ignoring", other),
         }
     }

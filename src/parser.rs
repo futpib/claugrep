@@ -23,6 +23,7 @@ pub enum Target {
     PermissionMode,
     Attachment,
     Progress,
+    PullRequest,
 }
 
 impl Target {
@@ -46,6 +47,7 @@ impl Target {
             Target::PermissionMode => "permission-mode",
             Target::Attachment => "attachment",
             Target::Progress => "progress",
+            Target::PullRequest => "pull-request",
         }
     }
 }
@@ -287,6 +289,33 @@ pub fn extract_from_entry(
             }
         }
         _ => {
+            // Pull-request metadata records have no `type` field — they surface
+            // a PR number / owning repo / URL alongside a sessionId, written
+            // when a session is associated with a GitHub PR.
+            if entry.get("prRepository").and_then(|v| v.as_str()).is_some() {
+                if targets.contains(&Target::PullRequest) {
+                    let repo = entry["prRepository"].as_str().unwrap_or("");
+                    let number = entry["prNumber"].as_u64();
+                    let url = entry["prUrl"].as_str().unwrap_or("");
+                    let text = match (number, url.is_empty()) {
+                        (Some(n), false) => format!("{}#{}\n{}", repo, n, url),
+                        (Some(n), true) => format!("{}#{}", repo, n),
+                        (None, false) => format!("{}\n{}", repo, url),
+                        (None, true) => repo.to_string(),
+                    };
+                    out.push(ExtractedContent {
+                        target: Target::PullRequest,
+                        text,
+                        tool_name: Some(repo.to_string()),
+                        timestamp: timestamp.to_string(),
+                        session_id: entry_session.to_string(),
+                        edit_diff: None,
+                        raw_entry: None,
+                    });
+                }
+                return;
+            }
+
             let raw = entry.to_string();
             let preview: String = raw.chars().take(120).collect();
             let ellipsis = if raw.chars().count() > 120 { "..." } else { "" };
@@ -747,6 +776,7 @@ mod tests {
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
+            Target::PullRequest,
         ].into_iter().collect()
     }
 
@@ -1165,6 +1195,48 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", false);
         let user = contents.iter().find(|c| c.target == Target::User).unwrap();
         assert_eq!(user.text, "[image: image/jpeg, https://example.com/pic.jpg]");
+    }
+
+    #[test]
+    fn test_extract_pull_request_record() {
+        // PR records have no `type` field — they carry prNumber/prRepository/prUrl
+        // and a sessionId. They should be recognized as pull-request target rather
+        // than hitting the unrecognized-record warning.
+        let f = write_jsonl(&[
+            r#"{"prNumber":13,"prRepository":"futpib/slopd","prUrl":"https://github.com/futpib/slopd/pull/13","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pr = contents.iter().find(|c| c.target == Target::PullRequest)
+            .expect("pull-request record should be extracted");
+        assert!(pr.text.contains("futpib/slopd#13"), "text should include repo#number: {:?}", pr.text);
+        assert!(pr.text.contains("https://github.com/futpib/slopd/pull/13"),
+            "text should include URL: {:?}", pr.text);
+        assert_eq!(pr.tool_name.as_deref(), Some("futpib/slopd"));
+    }
+
+    #[test]
+    fn test_pull_request_target_filtering() {
+        // Without PullRequest in targets, the record should be silently skipped
+        // (no warning, no extracted content).
+        let f = write_jsonl(&[
+            r#"{"prNumber":2,"prRepository":"futpib/goal","prUrl":"https://github.com/futpib/goal/pull/2","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::User].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 0, "should not extract without PullRequest in target set");
+    }
+
+    #[test]
+    fn test_pull_request_record_falls_back_without_number_or_url() {
+        // Even partially-populated PR records should still be recognized — we
+        // fall back to whatever fields are present rather than warning.
+        let f = write_jsonl(&[
+            r#"{"prRepository":"owner/repo","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let pr = contents.iter().find(|c| c.target == Target::PullRequest)
+            .expect("repo-only PR record should still be extracted");
+        assert_eq!(pr.text, "owner/repo");
     }
 
     #[test]

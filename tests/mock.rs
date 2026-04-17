@@ -458,6 +458,20 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a pull-request metadata record. These records have no `type`
+    /// field; they're written when a session is associated with a GitHub PR.
+    fn pull_request(mut self, repository: &str, number: u64) -> Self {
+        let sid = self.session_id.clone();
+        let url = format!("https://github.com/{}/pull/{}", repository, number);
+        self.write(serde_json::json!({
+            "prNumber": number,
+            "prRepository": repository,
+            "prUrl": url,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     fn done(mut self) {
         self.file.flush().unwrap();
     }
@@ -3143,6 +3157,97 @@ fn test_image_block_not_warned() {
         "dump should show an image placeholder marker, got: {}", text);
     assert!(text.contains("UNIQUE_TEXT_AFTER_IMAGE"),
         "text messages in the same session should still be extracted");
+}
+
+#[test]
+fn test_pull_request_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("pr-nowarn");
+    proj.session("sess-prw")
+        .user_message("hello")
+        .pull_request("futpib/slopd", 13)
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "pull-request records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
+fn test_search_pull_request() {
+    // With -t pull-request, searching for the repo slug should find the record.
+    // Default targets must NOT include pull-request records.
+    let world = MockWorld::new();
+    let proj = world.project("pr-search");
+    proj.session("sess-prs")
+        .user_message("hello")
+        .pull_request("aljazceru/awesome-nostr", 643)
+        .assistant_message("hi")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "awesome-nostr", "-t", "pull-request", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t pull-request should find records by repo slug");
+
+    let miss = world
+        .cmd()
+        .args(["search", "awesome-nostr", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "pull-request records should not appear in default targets");
+}
+
+#[test]
+fn test_search_pull_request_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("pr-all");
+    proj.session("sess-pra")
+        .user_message("hello")
+        .pull_request("futpib/attach", 2)
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "futpib/attach", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include pull-request records");
+}
+
+#[test]
+fn test_dump_pull_request_shows_number_and_url() {
+    let world = MockWorld::new();
+    let proj = world.project("pr-dump");
+    proj.session("sess-prd")
+        .user_message("hello user")
+        .pull_request("futpib/slopd", 11)
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "pull-request", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("futpib/slopd#11"),
+        "dump should show the repo#number form, got: {}", text);
+    assert!(!text.contains("hello user"),
+        "only pull-request records should be shown when -t pull-request");
 }
 
 #[test]
