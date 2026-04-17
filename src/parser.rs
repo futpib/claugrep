@@ -378,6 +378,19 @@ fn extract_user(
                     });
                 }
             }
+            "image" => {
+                if let Some(target) = user_target.clone() {
+                    out.push(ExtractedContent {
+                        target,
+                        text: format_image_marker(&block["source"]),
+                        tool_name: None,
+                        timestamp: timestamp.to_string(),
+                        session_id: session_id.to_string(),
+                        edit_diff: None,
+                        raw_entry: None,
+                    });
+                }
+            }
             other => {
                 eprintln!("warning: skipping unrecognized user content block type '{}'", other);
             }
@@ -472,6 +485,33 @@ fn format_attachment_delta(attachment: &serde_json::Value) -> Option<String> {
         lines.push(blocks.join("\n"));
     }
     Some(lines.join("\n"))
+}
+
+/// Render an image content block as a short `[image: <mime>, <N> bytes]` marker so
+/// searches over user messages at least see that an image was present, even though
+/// the pixel data itself isn't searchable. For URL-sourced images, surface the URL
+/// instead of byte count.
+fn format_image_marker(source: &serde_json::Value) -> String {
+    let source_type = source["type"].as_str().unwrap_or("");
+    let media_type = source["media_type"].as_str().unwrap_or("image");
+    match source_type {
+        "base64" => {
+            let data = source["data"].as_str().unwrap_or("");
+            // Base64 expands 3 bytes into 4 chars; subtract padding for exactness.
+            let padding = data.bytes().rev().take_while(|&b| b == b'=').count();
+            let decoded = data.len() / 4 * 3 - padding.min(data.len() / 4 * 3);
+            format!("[image: {}, {} bytes]", media_type, decoded)
+        }
+        "url" => {
+            let url = source["url"].as_str().unwrap_or("");
+            if url.is_empty() {
+                format!("[image: {}]", media_type)
+            } else {
+                format!("[image: {}, {}]", media_type, url)
+            }
+        }
+        _ => format!("[image: {}]", media_type),
+    }
 }
 
 fn extract_tool_result_text(block: &serde_json::Value) -> Option<String> {
@@ -1099,6 +1139,32 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", false);
         let txt = contents.iter().find(|c| c.target == Target::User).unwrap();
         assert_eq!(txt.text, "hi");
+    }
+
+    #[test]
+    fn test_image_user_block_renders_placeholder_marker() {
+        // Images should produce a short `[image: <mime>, <N> bytes]` marker rather
+        // than triggering the "unrecognized block" warning. A sibling text block
+        // in the same message must still be extracted independently.
+        // The data "AAAA" is 4 base64 chars = 3 decoded bytes.
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}},{"type":"text","text":"caption"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let user_blocks: Vec<_> = contents.iter().filter(|c| c.target == Target::User).collect();
+        assert_eq!(user_blocks.len(), 2, "both image marker and text should be extracted");
+        assert_eq!(user_blocks[0].text, "[image: image/png, 3 bytes]");
+        assert_eq!(user_blocks[1].text, "caption");
+    }
+
+    #[test]
+    fn test_image_url_source_renders_url_marker() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"image","source":{"type":"url","media_type":"image/jpeg","url":"https://example.com/pic.jpg"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let user = contents.iter().find(|c| c.target == Target::User).unwrap();
+        assert_eq!(user.text, "[image: image/jpeg, https://example.com/pic.jpg]");
     }
 
     #[test]
