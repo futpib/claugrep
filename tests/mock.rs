@@ -4186,3 +4186,200 @@ fn test_dump_label_plain_with_color_never() {
     assert!(raw.contains("[thinking]"),
         "expected literal [thinking] label, got: {:?}", raw);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Record-level context (--around-records / --before-records / --after-records /
+// --records / --records-type)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_around_records_shows_adjacent_records() {
+    let world = MockWorld::new();
+    let proj = world.project("around-rec");
+    proj.session("sess-around")
+        .user_message("user_before_MATCH_UNIQUE_AR")
+        .assistant_message("assistant_reply_TARGET_AR")
+        .user_message("user_after_MATCH_UNIQUE_AR")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_AR", "-t", "assistant", "--around-records", "1",
+            "--project", proj.path(), "--color", "never"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("Match"), "should have a match header: {:?}", raw);
+    assert!(raw.contains("Context -1"), "should show previous record: {:?}", raw);
+    assert!(raw.contains("Context +1"), "should show next record: {:?}", raw);
+    assert!(raw.contains("user_before"), "should contain previous user text: {:?}", raw);
+    assert!(raw.contains("user_after"), "should contain next user text: {:?}", raw);
+}
+
+#[test]
+fn test_search_records_type_filter_hides_intermediates() {
+    // With --records-type=user, offsets advance only over user records.
+    // The assistant/bash records between should NOT be shown as context.
+    let world = MockWorld::new();
+    let proj = world.project("records-type");
+    proj.session("sess-rt")
+        .user_message("user_first_UTF")
+        .assistant_message("TARGET_RT_assistant_reply")   // match
+        .bash("echo filler", "bash_filler_output_UTF")
+        .user_message("user_second_UTF")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_RT", "-t", "assistant",
+            "--records", "1", "--records-type", "user",
+            "--project", proj.path(), "--color", "never"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("Context +1"), "should have context: {:?}", raw);
+    assert!(raw.contains("user_second_UTF"),
+        "context should be the next user record, got: {:?}", raw);
+    assert!(!raw.contains("bash_filler"),
+        "intermediate bash record should be hidden, got: {:?}", raw);
+}
+
+#[test]
+fn test_search_records_spec_negative_offset() {
+    // "the previous user message" via --records=-1 --records-type=user
+    let world = MockWorld::new();
+    let proj = world.project("records-neg");
+    proj.session("sess-neg")
+        .user_message("user_before_UB")
+        .assistant_message("filler_assistant_FA")
+        .user_message("user_pivot_UP")
+        .assistant_message("TARGET_NEG_assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_NEG", "-t", "assistant",
+            "--records", "-1", "--records-type", "user",
+            "--project", proj.path(), "--color", "never"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("Context -1"), "should show the previous-user context: {:?}", raw);
+    assert!(raw.contains("user_pivot_UP"),
+        "--records=-1 --records-type=user should pick the immediately-previous user record, got: {:?}", raw);
+    assert!(!raw.contains("filler_assistant_FA"),
+        "intermediate assistant record should be hidden, got: {:?}", raw);
+}
+
+#[test]
+fn test_search_records_invalid_spec_exits_nonzero() {
+    let world = MockWorld::new();
+    let proj = world.project("records-err");
+    proj.session("sess-err")
+        .user_message("whatever")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "whatever", "--records", "3..1",
+            "--project", proj.path()])
+        .output()
+        .unwrap();
+
+    assert!(!out.status.success(), "reversed range should exit non-zero");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("reversed") || err.contains("start must be <= end"),
+        "error should mention reversed range, got: {:?}", err);
+}
+
+#[test]
+fn test_search_records_json_output_wraps_match_and_context() {
+    let world = MockWorld::new();
+    let proj = world.project("records-json");
+    proj.session("sess-json")
+        .user_message("user_before_JSN")
+        .assistant_message("TARGET_JSN_match")
+        .user_message("user_after_JSN")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_JSN", "-t", "assistant",
+            "--around-records", "1", "--records-type", "user",
+            "--project", proj.path(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    let line = raw.lines().next().expect("at least one JSON line");
+    let obj: serde_json::Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("expected JSON, got {:?} ({})", line, e));
+    assert!(obj.get("match").is_some(), "JSON should have 'match' field: {:?}", obj);
+    let ctx = obj.get("context").and_then(|v| v.as_array())
+        .expect("JSON should have 'context' array");
+    assert_eq!(ctx.len(), 2, "expected 2 context entries, got: {:?}", ctx);
+    let offsets: Vec<i64> = ctx.iter()
+        .filter_map(|c| c.get("offset").and_then(|o| o.as_i64()))
+        .collect();
+    assert_eq!(offsets, vec![-1, 1],
+        "context offsets should be [-1, 1] in order, got {:?}", offsets);
+}
+
+#[test]
+fn test_search_json_without_records_is_unchanged() {
+    // Existing --json behavior (one raw entry per line) must be preserved when
+    // no record-context flags are used, so downstream consumers aren't broken.
+    let world = MockWorld::new();
+    let proj = world.project("records-json-compat");
+    proj.session("sess-compat")
+        .user_message("TARGET_COMPAT")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_COMPAT", "-t", "user",
+            "--project", proj.path(), "--json"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    let line = raw.lines().next().expect("expected one JSON line");
+    let obj: serde_json::Value = serde_json::from_str(line).unwrap();
+    // Legacy format = the raw entry itself. It has a "type" field, not "match".
+    assert!(obj.get("type").is_some(),
+        "legacy JSON should carry the raw 'type' field, got {:?}", obj);
+    assert!(obj.get("match").is_none(),
+        "legacy JSON should not be wrapped when --records isn't used, got {:?}", obj);
+}
+
+#[test]
+fn test_search_records_clamps_at_session_boundary() {
+    // Asking for a wider window than the session has should silently clip,
+    // not error.
+    let world = MockWorld::new();
+    let proj = world.project("records-clamp");
+    proj.session("sess-clamp")
+        .user_message("TARGET_CLAMP_only")   // single record in the whole session
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["search", "TARGET_CLAMP", "-t", "user", "--around-records", "5",
+            "--project", proj.path(), "--color", "never"])
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let raw = stdout(&out);
+    assert!(raw.contains("Match"), "should still produce a match: {:?}", raw);
+    assert!(!raw.contains("Context -"), "no records before, no Context - line: {:?}", raw);
+    assert!(!raw.contains("Context +"), "no records after, no Context + line: {:?}", raw);
+}

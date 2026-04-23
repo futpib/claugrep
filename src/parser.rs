@@ -53,6 +53,7 @@ impl Target {
 }
 
 /// Diff data extracted from an Edit tool call.
+#[derive(Clone)]
 pub struct EditDiff {
     pub file_path: String,
     pub old_string: String,

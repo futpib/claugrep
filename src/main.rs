@@ -88,6 +88,28 @@ enum Commands {
         #[arg(short = 'A', long = "after-context")]
         after_context: Option<usize>,
 
+        /// Record-level context: N records before the match and N records after.
+        #[arg(long = "around-records", value_name = "N")]
+        around_records: Option<usize>,
+
+        /// Record-level context: N records immediately before the match.
+        #[arg(long = "before-records", value_name = "N")]
+        before_records: Option<usize>,
+
+        /// Record-level context: N records immediately after the match.
+        #[arg(long = "after-records", value_name = "N")]
+        after_records: Option<usize>,
+
+        /// Record-level context spec: signed offsets and inclusive ranges, comma-separated
+        /// (e.g. "5", "-3..-1", "-3..3", "-2,2,5"). Offset 0 is ignored (the match is always shown).
+        #[arg(long = "records", value_name = "SPEC", allow_hyphen_values = true)]
+        records: Option<String>,
+
+        /// Restrict record-level context to these types; offsets advance only over matching
+        /// types and non-matching records are hidden. Accepts the same tokens as -t.
+        #[arg(long = "records-type", value_name = "TYPES")]
+        records_type: Option<String>,
+
         /// Max results
         #[arg(long, default_value = "50")]
         max_results: usize,
@@ -345,6 +367,87 @@ fn all_targets() -> HashSet<Target> {
     t
 }
 
+/// Parse a record-context SPEC like "5", "-3..3", "-5..-1,1..5" into sorted, deduped offsets.
+/// Offset 0 is silently dropped (the match itself is always shown). Returns an error for
+/// unparseable tokens or reversed ranges (M..N with M > N).
+fn parse_records_spec(spec: &str) -> Result<Vec<i32>, String> {
+    let mut offsets: std::collections::BTreeSet<i32> = Default::default();
+    for raw in spec.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if let Some(idx) = part.find("..") {
+            let lhs = part[..idx].trim();
+            let rhs = part[idx + 2..].trim();
+            if lhs.is_empty() || rhs.is_empty() {
+                return Err(format!(
+                    "open-ended range '{}' not supported; both endpoints required",
+                    part
+                ));
+            }
+            let start: i32 = lhs.parse()
+                .map_err(|_| format!("invalid offset '{}' in range '{}'", lhs, part))?;
+            let end: i32 = rhs.parse()
+                .map_err(|_| format!("invalid offset '{}' in range '{}'", rhs, part))?;
+            if end < start {
+                return Err(format!(
+                    "range '{}' is reversed ({} > {}); start must be <= end", part, start, end
+                ));
+            }
+            for n in start..=end {
+                if n != 0 {
+                    offsets.insert(n);
+                }
+            }
+        } else {
+            let n: i32 = part.parse()
+                .map_err(|_| format!("invalid offset '{}'", part))?;
+            if n != 0 {
+                offsets.insert(n);
+            }
+        }
+    }
+    Ok(offsets.into_iter().collect())
+}
+
+/// Combine shorthand record-context flags with the explicit --records SPEC.
+/// Returns the merged sorted/deduped offsets, or an error if SPEC is malformed.
+fn merge_record_context(
+    around: Option<usize>,
+    before: Option<usize>,
+    after: Option<usize>,
+    spec: Option<&str>,
+) -> Result<Vec<i32>, String> {
+    let mut offsets: std::collections::BTreeSet<i32> = Default::default();
+    if let Some(n) = around {
+        let n = n as i32;
+        for i in 1..=n {
+            offsets.insert(-i);
+            offsets.insert(i);
+        }
+    }
+    if let Some(n) = before {
+        let n = n as i32;
+        for i in 1..=n {
+            offsets.insert(-i);
+        }
+    }
+    if let Some(n) = after {
+        let n = n as i32;
+        for i in 1..=n {
+            offsets.insert(i);
+        }
+    }
+    if let Some(s) = spec {
+        for off in parse_records_spec(s)? {
+            offsets.insert(off);
+        }
+    }
+    Ok(offsets.into_iter().collect())
+}
+
 fn parse_targets(s: &str) -> HashSet<Target> {
     let mut out: HashSet<Target> = HashSet::new();
     for tok in s.split(',') {
@@ -517,6 +620,27 @@ fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<S
     all
 }
 
+/// Emit a SearchMatch as JSON to stdout.
+/// With `wrap_context = false` this preserves the historical stream format
+/// (one raw entry per line). With `wrap_context = true` each match is wrapped
+/// in `{"match": raw, "context": [{"offset": n, "entry": raw}, ...]}` so the
+/// neighboring records the user asked for can be grouped with their match.
+fn emit_json_match(m: &crate::search::SearchMatch, wrap_context: bool) {
+    if wrap_context {
+        let ctx: Vec<serde_json::Value> = m.context_records.iter().map(|c| json!({
+            "offset": c.offset,
+            "entry": c.raw_entry,
+        })).collect();
+        let obj = json!({
+            "match": m.raw_entry,
+            "context": ctx,
+        });
+        println!("{}", obj);
+    } else if let Some(ref raw) = m.raw_entry {
+        println!("{}", raw);
+    }
+}
+
 fn print_dump_record(content: &parser::ExtractedContent, json: bool, no_diff: bool) {
     if json {
         if let Some(ref raw) = content.raw_entry {
@@ -593,11 +717,33 @@ fn main() {
         Commands::Search {
             pattern, targets: targets_str,
             project, session, context, before_context, after_context,
+            around_records, before_records, after_records, records, records_type,
             max_results, max_line_width, json, sessions_with_matches, ignore_case, no_diff,
             fixed_strings, extended_regexp,
             all_projects, project_regexp,
         } => {
             let targets = parse_targets(&targets_str);
+
+            let context_offsets = match merge_record_context(
+                around_records, before_records, after_records, records.as_deref(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    std::process::exit(2);
+                }
+            };
+            let context_type_filter: Option<HashSet<Target>> = records_type
+                .as_deref()
+                .map(parse_targets);
+
+            // When record-context is requested, extract all known types so offsets
+            // can walk over any record; otherwise just the -t targets are enough.
+            let extract_targets: HashSet<Target> = if context_offsets.is_empty() {
+                targets.clone()
+            } else {
+                all_targets()
+            };
 
             let flags = if ignore_case { "(?i)" } else { "" };
             let escaped = regex::escape(&pattern);
@@ -632,6 +778,7 @@ fn main() {
             let options = SearchOptions {
                 patterns: patterns.clone(),
                 targets,
+                extract_targets,
                 context_before: before_context.unwrap_or(ctx),
                 context_after: after_context.unwrap_or(ctx),
                 max_results,
@@ -639,6 +786,8 @@ fn main() {
                 json_output: json,
                 sessions_with_matches,
                 diff_mode: !no_diff,
+                context_offsets,
+                context_type_filter,
             };
 
             let is_multi_project = all_projects || !project_regexp.is_empty();
@@ -702,10 +851,9 @@ fn main() {
                             Err(_) => continue,
                         };
                         let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
+                        let wrap_context = !proj_options.context_offsets.is_empty();
                         let count = search_sessions(&sessions, &proj_options, |m| {
-                            if let Some(ref raw) = m.raw_entry {
-                                println!("{}", raw);
-                            }
+                            emit_json_match(&m, wrap_context);
                         });
                         remaining = remaining.saturating_sub(count);
                     }
@@ -837,10 +985,9 @@ fn main() {
                     });
                     if total == 0 { std::process::exit(1); }
                 } else if json {
+                    let wrap_context = !options.context_offsets.is_empty();
                     search_sessions(&sessions, &options, |m| {
-                        if let Some(ref raw) = m.raw_entry {
-                            println!("{}", raw);
-                        }
+                        emit_json_match(&m, wrap_context);
                     });
                 } else {
                     reset_truncation_state();
@@ -1415,4 +1562,122 @@ fn format_memory_line(line: &str, is_match: bool, patterns: &[Regex], max_line_w
     let marker = if is_match { ">" } else { " " };
     let rendered = output::highlight_matches(line, patterns, max_line_width);
     format!("  {} {}", marker, rendered)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_records_spec_single_positive() {
+        assert_eq!(parse_records_spec("5").unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_single_negative() {
+        assert_eq!(parse_records_spec("-3").unwrap(), vec![-3]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_range_positive() {
+        assert_eq!(parse_records_spec("1..3").unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_range_negative() {
+        assert_eq!(parse_records_spec("-3..-1").unwrap(), vec![-3, -2, -1]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_range_across_zero_drops_zero() {
+        // Offset 0 (the match itself) is always silently skipped.
+        assert_eq!(parse_records_spec("-2..2").unwrap(), vec![-2, -1, 1, 2]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_comma_list() {
+        assert_eq!(parse_records_spec("-3,-1,2,5").unwrap(), vec![-3, -1, 2, 5]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_mixed_ranges_and_singletons() {
+        assert_eq!(parse_records_spec("-3..-1,2,5..6").unwrap(), vec![-3, -2, -1, 2, 5, 6]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_dedups_overlapping() {
+        // Overlapping ranges collapse via BTreeSet.
+        assert_eq!(parse_records_spec("1..3,2..4").unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_parse_records_spec_reversed_range_errors() {
+        assert!(parse_records_spec("3..1").is_err());
+    }
+
+    #[test]
+    fn test_parse_records_spec_open_ended_errors() {
+        assert!(parse_records_spec("1..").is_err());
+        assert!(parse_records_spec("..3").is_err());
+    }
+
+    #[test]
+    fn test_parse_records_spec_garbage_errors() {
+        assert!(parse_records_spec("abc").is_err());
+        assert!(parse_records_spec("1..x").is_err());
+    }
+
+    #[test]
+    fn test_parse_records_spec_only_zero_is_empty() {
+        assert_eq!(parse_records_spec("0").unwrap(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_parse_records_spec_ignores_whitespace_and_blanks() {
+        assert_eq!(parse_records_spec(" 1 , , -2 ").unwrap(), vec![-2, 1]);
+    }
+
+    #[test]
+    fn test_merge_record_context_around() {
+        assert_eq!(
+            merge_record_context(Some(2), None, None, None).unwrap(),
+            vec![-2, -1, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_merge_record_context_before_only() {
+        assert_eq!(
+            merge_record_context(None, Some(3), None, None).unwrap(),
+            vec![-3, -2, -1]
+        );
+    }
+
+    #[test]
+    fn test_merge_record_context_after_only() {
+        assert_eq!(
+            merge_record_context(None, None, Some(3), None).unwrap(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn test_merge_record_context_combines_all_sources() {
+        // Shorthand flags and --records SPEC unify into one sorted, deduped set.
+        let got = merge_record_context(
+            Some(1),          // around 1 -> {-1, 1}
+            None,
+            Some(3),          // after 3 -> {1, 2, 3}
+            Some("-5..-4,7"), // -> {-5, -4, 7}
+        ).unwrap();
+        assert_eq!(got, vec![-5, -4, -1, 1, 2, 3, 7]);
+    }
+
+    #[test]
+    fn test_merge_record_context_empty_when_none_set() {
+        assert_eq!(
+            merge_record_context(None, None, None, None).unwrap(),
+            Vec::<i32>::new()
+        );
+    }
 }

@@ -88,6 +88,11 @@ Pass one or more types as a comma-separated value to `-t/--targets`, e.g. `--tar
 | `-C, --context <n>` | 0 | Context lines around each match |
 | `-B, --before-context <n>` | 0 | Context lines before each match |
 | `-A, --after-context <n>` | 0 | Context lines after each match |
+| `--around-records <n>` | | Record-level context: N records before + N after the match |
+| `--before-records <n>` | | Record-level context: N records immediately before the match |
+| `--after-records <n>` | | Record-level context: N records immediately after the match |
+| `--records <spec>` | | Record-level context spec: signed offsets & ranges (see below) |
+| `--records-type <types>` | | Count and display record context only over these types |
 | `--max-results <n>` | 50 | Maximum number of matches to return |
 | `--max-line-width <n>` | 200 | Truncate long lines to this width (0 = unlimited) |
 | `-i, --ignore-case` | | Case-insensitive search |
@@ -100,6 +105,20 @@ Pass one or more types as a comma-separated value to `-t/--targets`, e.g. `--tar
 | `-P, --project-regexp <REGEXP>` | | Search only projects whose path matches REGEXP; can be repeated (ignores `--project`) |
 
 **Edit tool diffs:** When a `tool-use` match is an Edit tool call, the result is rendered as a unified diff by default (old lines prefixed `-`, new lines `+`). Pass `--no-diff` to see the raw `file_path` / `old_string` / `new_string` key-value format instead.
+
+**Record-level context:** `-A/-B/-C` grow the matched *record* with extra *lines* from inside that record. `--around-records`/`--before-records`/`--after-records` instead pull in neighboring *records* of the session (the preceding/following user prompt, assistant turn, tool call, etc.) as additional context blocks around the match.
+
+For precise selection, `--records <SPEC>` accepts:
+
+- a signed integer: `5` (5th record after the match), `-3` (3rd before)
+- an inclusive range: `1..5` (records 1 through 5 after), `-3..-1` (3rd through 1st before), `-3..3` (window spanning the match)
+- comma-separated combinations: `-3,-1,2,5` or `-5..-3,3..5`
+
+Offset `0` refers to the match itself and is silently ignored — the matched record is always shown.
+
+With `--records-type <types>`, offsets advance only over records of the given types; intermediate records of other types are *hidden* from the output. This is how you ask for "the previous user prompt" (`--records=-1 --records-type=user`) or "the next two assistant turns" (`--records=1..2 --records-type=assistant`), skipping over tool uses and other noise in between.
+
+When `--json` is combined with any record-context flag, each match is wrapped as `{"match": <raw entry>, "context": [{"offset": <n>, "entry": <raw entry>}, ...]}` so consumers can tell match and context apart. Without record-context flags, `--json` keeps its legacy one-raw-entry-per-line format.
 
 **Session offsets:** `--session 0` or `--session -1`, `--session -2` … select relative to the most recent session (0 = latest, -1 = previous, …). `--session 1`, `--session 2` … select from the oldest session forwards (1-based).
 
@@ -197,6 +216,18 @@ claugrep search "file[0]" --fixed-strings
 
 # Show 2 context lines around each match
 claugrep search "serde_json" -C 2
+
+# Show 3 surrounding records (whole user/assistant/tool records, not just lines)
+claugrep search "serde_json" --around-records 3
+
+# Show the next user prompt after each matching bash command
+claugrep search "cargo test" --targets bash-command --records=1 --records-type=user
+
+# Show the previous user prompt and the next one, skipping any tool/assistant records between
+claugrep search "error" --records=-1,1 --records-type=user
+
+# Show the 3rd through 5th records after the match
+claugrep search "TODO" --records=3..5
 
 # Search a specific project
 claugrep search "feature request" --targets user --project ~/code/my-project

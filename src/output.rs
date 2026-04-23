@@ -1,4 +1,4 @@
-use crate::search::SearchMatch;
+use crate::search::{ContextRecord, SearchMatch};
 use crate::parser::ExtractedContent;
 use regex::Regex;
 use console::style;
@@ -213,7 +213,61 @@ pub fn format_diff(
     lines.push(style("tool: Edit").dim().to_string());
     lines.extend(render_unified_diff(diff, patterns, max_line_width, context_lines));
 
+    let body = lines.join("\n");
+    with_context_records(&body, &m.context_records, patterns, max_line_width)
+}
+
+fn format_context_record(
+    c: &ContextRecord,
+    patterns: &[Regex],
+    max_width: usize,
+) -> String {
+    let time = format_timestamp(&c.timestamp);
+    let target = c.target.as_str();
+    let tool_suffix = c.tool_name.as_deref().map(|t| format!(":{}", t)).unwrap_or_default();
+    let sign = if c.offset > 0 { "+" } else { "" };
+    let header = style(format!(
+        "--- Context {}{} | {} | {}{} ---",
+        sign, c.offset, time, target, tool_suffix
+    )).dim().cyan().to_string();
+
+    if let Some(ref diff) = c.edit_diff {
+        let mut lines = vec![header];
+        lines.push(style("tool: Edit").dim().to_string());
+        lines.extend(render_unified_diff(diff, patterns, max_width, 3));
+        return lines.join("\n");
+    }
+
+    let mut lines = vec![header];
+    if let Some(ref tool) = c.tool_name {
+        lines.push(style(format!("tool: {}", tool)).dim().to_string());
+    }
+    for raw_line in c.text.split('\n') {
+        let (rendered, _) = truncate_line(raw_line, patterns, max_width);
+        lines.push(format!("  {}", rendered));
+    }
     lines.join("\n")
+}
+
+/// Stitch together context records (before), the already-formatted match body, and context records (after).
+fn with_context_records(
+    body: &str,
+    context: &[ContextRecord],
+    patterns: &[Regex],
+    max_width: usize,
+) -> String {
+    if context.is_empty() {
+        return body.to_string();
+    }
+    let mut blocks: Vec<String> = vec![];
+    for c in context.iter().filter(|c| c.offset < 0) {
+        blocks.push(format_context_record(c, patterns, max_width));
+    }
+    blocks.push(body.to_string());
+    for c in context.iter().filter(|c| c.offset > 0) {
+        blocks.push(format_context_record(c, patterns, max_width));
+    }
+    blocks.join("\n\n")
 }
 
 /// Render an EditDiff as a standalone unified diff (for dump/tail/last).
@@ -245,7 +299,8 @@ pub fn format_match(m: &SearchMatch, patterns: &[Regex], max_width: usize) -> St
         lines.push(format!("{}{}", prefix, content));
     }
 
-    lines.join("\n")
+    let body = lines.join("\n");
+    with_context_records(&body, &m.context_records, patterns, max_width)
 }
 
 pub fn format_record(r: &ExtractedContent, max_width: usize) -> String {
@@ -452,6 +507,7 @@ mod tests {
             matched_lines: vec![],
             edit_diff,
             raw_entry: None,
+            context_records: vec![],
         }
     }
 
