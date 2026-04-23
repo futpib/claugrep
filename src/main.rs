@@ -935,12 +935,9 @@ fn main() {
 
         Commands::Sessions { project, json } => {
             let project_path = resolve_project(&project);
-            // For Sessions command, use the first config dir
-            let config_dir = config_dirs.first().map(|(_, d)| d.as_path())
-                .unwrap_or_else(|| Path::new(""));
             let sessions = filter_sessions_before(
                 filter_sessions_since(
-                    discover_sessions(&project_path, None, config_dir),
+                    discover_sessions_across_configs(&project_path, &config_dirs),
                     since,
                 ),
                 before,
@@ -1243,18 +1240,17 @@ fn main() {
         }
 
         Commands::Memory { subcommand } => {
-            let config_dir = config_dirs.first().map(|(_, d)| d.clone())
-                .unwrap_or_else(sessions::default_claude_config_dir);
-            run_memory(subcommand, &config_dir);
+            let paths: Vec<&Path> = config_dirs.iter().map(|(_, d)| d.as_path()).collect();
+            run_memory(subcommand, &paths);
         }
     }
 }
 
-fn run_memory(cmd: MemoryCommands, config_dir: &Path) {
+fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path]) {
     match cmd {
         MemoryCommands::Dump { project, no_subdirs, json, files_only } => {
             let cwd = resolve_project_path(&project);
-            let files = discover_memory_files(&cwd, config_dir, !no_subdirs);
+            let files = discover_memory_files(&cwd, config_dirs, !no_subdirs);
 
             if files.is_empty() {
                 eprintln!("No memory files found for {}", cwd.display());
@@ -1303,7 +1299,7 @@ fn run_memory(cmd: MemoryCommands, config_dir: &Path) {
             files_with_matches, ignore_case, fixed_strings, extended_regexp,
         } => {
             let cwd = resolve_project_path(&project);
-            let files = discover_memory_files(&cwd, config_dir, !no_subdirs);
+            let files = discover_memory_files(&cwd, config_dirs, !no_subdirs);
 
             if files.is_empty() {
                 eprintln!("No memory files found for {}", cwd.display());

@@ -63,13 +63,15 @@ fn is_ignored_dir(name: &str) -> bool {
 /// Discover every markdown memory file that would apply to `cwd` if a Claude Code
 /// session started there, in load order:
 ///   1. Managed policy
-///   2. User global (+ imports)
+///   2. User global (+ imports) — per config dir
 ///   3. Ancestor CLAUDE.md files from root down to cwd (+ imports)
 ///   4. Subdir CLAUDE.md files (on-demand)
-///   5. Auto-memory index + topic files
+///   5. Auto-memory index + topic files — per config dir
 ///
+/// `config_dirs` lets callers pass the default plus every claudex account root so
+/// per-account user-global files and per-account auto-memory dirs are all included.
 /// `cwd` should already be canonicalized by the caller.
-pub fn discover_memory_files(cwd: &Path, config_dir: &Path, include_subdirs: bool) -> Vec<MemoryFile> {
+pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs: bool) -> Vec<MemoryFile> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut result: Vec<MemoryFile> = Vec::new();
 
@@ -92,17 +94,19 @@ pub fn discover_memory_files(cwd: &Path, config_dir: &Path, include_subdirs: boo
         }
     }
 
-    // 2. User global
-    for name in ["CLAUDE.md", "CLAUDE.local.md"] {
-        let p = config_dir.join(name);
-        if p.is_file() {
-            push(&mut result, &mut seen, MemoryFile {
-                path: p.clone(), source: MemorySource::UserGlobal, imported_by: None,
-            });
-            for imp in collect_imports(&p, 5) {
+    // 2. User global — one pass per config dir
+    for config_dir in config_dirs {
+        for name in ["CLAUDE.md", "CLAUDE.local.md"] {
+            let p = config_dir.join(name);
+            if p.is_file() {
                 push(&mut result, &mut seen, MemoryFile {
-                    path: imp, source: MemorySource::Import, imported_by: Some(p.clone()),
+                    path: p.clone(), source: MemorySource::UserGlobal, imported_by: None,
                 });
+                for imp in collect_imports(&p, 5) {
+                    push(&mut result, &mut seen, MemoryFile {
+                        path: imp, source: MemorySource::Import, imported_by: Some(p.clone()),
+                    });
+                }
             }
         }
     }
@@ -149,31 +153,33 @@ pub fn discover_memory_files(cwd: &Path, config_dir: &Path, include_subdirs: boo
         }
     }
 
-    // 5. Auto-memory
+    // 5. Auto-memory — one pass per config dir
     let cwd_str = cwd.to_string_lossy();
-    let project_mem_dir = config_dir
-        .join("projects")
-        .join(encode_project_path(&cwd_str))
-        .join("memory");
+    for config_dir in config_dirs {
+        let project_mem_dir = config_dir
+            .join("projects")
+            .join(encode_project_path(&cwd_str))
+            .join("memory");
 
-    let index = project_mem_dir.join("MEMORY.md");
-    if index.is_file() {
-        push(&mut result, &mut seen, MemoryFile {
-            path: index, source: MemorySource::AutoMemoryIndex, imported_by: None,
-        });
-    }
-    if let Ok(entries) = fs::read_dir(&project_mem_dir) {
-        let mut topic: Vec<PathBuf> = entries.flatten()
-            .map(|e| e.path())
-            .filter(|p| p.is_file()
-                && p.extension().map(|e| e == "md").unwrap_or(false)
-                && p.file_name().map(|n| n != "MEMORY.md").unwrap_or(false))
-            .collect();
-        topic.sort();
-        for p in topic {
+        let index = project_mem_dir.join("MEMORY.md");
+        if index.is_file() {
             push(&mut result, &mut seen, MemoryFile {
-                path: p, source: MemorySource::AutoMemoryTopic, imported_by: None,
+                path: index, source: MemorySource::AutoMemoryIndex, imported_by: None,
             });
+        }
+        if let Ok(entries) = fs::read_dir(&project_mem_dir) {
+            let mut topic: Vec<PathBuf> = entries.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file()
+                    && p.extension().map(|e| e == "md").unwrap_or(false)
+                    && p.file_name().map(|n| n != "MEMORY.md").unwrap_or(false))
+                .collect();
+            topic.sort();
+            for p in topic {
+                push(&mut result, &mut seen, MemoryFile {
+                    path: p, source: MemorySource::AutoMemoryTopic, imported_by: None,
+                });
+            }
         }
     }
 
@@ -339,7 +345,7 @@ mod tests {
         fs::create_dir_all(&sub).unwrap();
         fs::write(sub.join("CLAUDE.md"), "sub\n").unwrap();
 
-        let files = discover_memory_files(&project, &config_dir, true);
+        let files = discover_memory_files(&project, &[config_dir.as_path()], true);
         let names: Vec<_> = files.iter()
             .map(|f| (f.path.file_name().unwrap().to_string_lossy().into_owned(), f.source))
             .collect();
@@ -363,7 +369,7 @@ mod tests {
         fs::write(project.join("CLAUDE.md"), "project\n").unwrap();
         fs::write(sub.join("CLAUDE.md"), "sub\n").unwrap();
 
-        let files = discover_memory_files(&project, &config_dir, false);
+        let files = discover_memory_files(&project, &[config_dir.as_path()], false);
         assert!(!files.iter().any(|f| f.source == MemorySource::Subdir));
     }
 
@@ -382,7 +388,7 @@ mod tests {
         fs::write(mem_dir.join("topic_a.md"), "a\n").unwrap();
         fs::write(mem_dir.join("topic_b.md"), "b\n").unwrap();
 
-        let files = discover_memory_files(&project, &config_dir, false);
+        let files = discover_memory_files(&project, &[config_dir.as_path()], false);
         let auto: Vec<_> = files.iter()
             .filter(|f| matches!(f.source, MemorySource::AutoMemoryIndex | MemorySource::AutoMemoryTopic))
             .map(|f| (f.path.file_name().unwrap().to_string_lossy().into_owned(), f.source))
@@ -391,5 +397,56 @@ mod tests {
         assert_eq!(auto[0].1, MemorySource::AutoMemoryIndex);
         assert_eq!(auto[0].0, "MEMORY.md");
         assert!(auto[1..].iter().all(|(_, s)| *s == MemorySource::AutoMemoryTopic));
+    }
+
+    #[test]
+    fn discover_merges_across_multiple_config_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let default_cfg = root.join(".claude");
+        let account_cfg = root.join("claudex/accounts/archive/claude");
+        fs::create_dir_all(&default_cfg).unwrap();
+        fs::create_dir_all(&account_cfg).unwrap();
+        fs::write(default_cfg.join("CLAUDE.md"), "default-global\n").unwrap();
+        fs::write(account_cfg.join("CLAUDE.md"), "archive-global\n").unwrap();
+
+        let project = root.join("proj");
+        fs::create_dir_all(&project).unwrap();
+        let encoded = encode_project_path(&project.to_string_lossy());
+
+        let default_mem = default_cfg.join("projects").join(&encoded).join("memory");
+        fs::create_dir_all(&default_mem).unwrap();
+        fs::write(default_mem.join("MEMORY.md"), "- default\n").unwrap();
+        fs::write(default_mem.join("topic_default.md"), "d\n").unwrap();
+
+        let account_mem = account_cfg.join("projects").join(&encoded).join("memory");
+        fs::create_dir_all(&account_mem).unwrap();
+        fs::write(account_mem.join("MEMORY.md"), "- archive\n").unwrap();
+        fs::write(account_mem.join("topic_archive.md"), "a\n").unwrap();
+
+        let files = discover_memory_files(
+            &project,
+            &[default_cfg.as_path(), account_cfg.as_path()],
+            false,
+        );
+
+        let globals: Vec<_> = files.iter()
+            .filter(|f| f.source == MemorySource::UserGlobal)
+            .map(|f| f.path.clone())
+            .collect();
+        assert!(globals.contains(&default_cfg.join("CLAUDE.md")),
+            "default user-global missing: {:?}", globals);
+        assert!(globals.contains(&account_cfg.join("CLAUDE.md")),
+            "account user-global missing: {:?}", globals);
+
+        let auto_paths: Vec<_> = files.iter()
+            .filter(|f| matches!(f.source,
+                MemorySource::AutoMemoryIndex | MemorySource::AutoMemoryTopic))
+            .map(|f| f.path.clone())
+            .collect();
+        assert!(auto_paths.contains(&default_mem.join("MEMORY.md")));
+        assert!(auto_paths.contains(&default_mem.join("topic_default.md")));
+        assert!(auto_paths.contains(&account_mem.join("MEMORY.md")));
+        assert!(auto_paths.contains(&account_mem.join("topic_archive.md")));
     }
 }
