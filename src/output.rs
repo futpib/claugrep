@@ -67,7 +67,7 @@ fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, b
     }
 }
 
-fn highlight_matches(line: &str, patterns: &[Regex], max_width: usize) -> String {
+pub fn highlight_matches(line: &str, patterns: &[Regex], max_width: usize) -> String {
     let (truncated, _) = truncate_line(line, patterns, max_width);
     let s = &truncated;
 

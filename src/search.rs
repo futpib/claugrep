@@ -42,7 +42,7 @@ pub struct SearchOptions {
     pub diff_mode: bool,
 }
 
-fn find_matches(
+pub fn find_matches(
     text: &str,
     patterns: &[Regex],
     context_before: usize,

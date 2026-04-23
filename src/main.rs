@@ -2,6 +2,7 @@ mod parser;
 mod sessions;
 mod search;
 mod output;
+mod memory;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,9 +14,10 @@ use regex::Regex;
 use serde_json::json;
 
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
-use crate::search::{search_sessions, SearchOptions};
+use crate::search::{search_sessions, SearchOptions, find_matches};
 use crate::output::{format_diff, format_edit_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::Target;
+use crate::memory::{discover_memory_files, MemoryFile};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ColorWhen {
@@ -236,6 +238,88 @@ enum Commands {
         /// Include subagent transcripts
         #[arg(long)]
         subagents: bool,
+    },
+
+    /// Inspect the CLAUDE.md and auto-memory markdown files that apply to a directory
+    Memory {
+        #[command(subcommand)]
+        subcommand: MemoryCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommands {
+    /// Print every markdown memory file that applies to the project
+    Dump {
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Exclude on-demand CLAUDE.md files in subdirectories
+        #[arg(long = "no-subdirs")]
+        no_subdirs: bool,
+
+        /// JSON output (one object per file with content inlined)
+        #[arg(long)]
+        json: bool,
+
+        /// Only print the list of discovered file paths
+        #[arg(short = 'l', long = "files-only")]
+        files_only: bool,
+    },
+
+    /// Search markdown memory files that apply to the project
+    Search {
+        /// Pattern to search (literal string and/or regex)
+        pattern: String,
+
+        /// Project path (default: current directory)
+        #[arg(long, default_value = ".")]
+        project: PathBuf,
+
+        /// Exclude on-demand CLAUDE.md files in subdirectories
+        #[arg(long = "no-subdirs")]
+        no_subdirs: bool,
+
+        /// Context lines around matches
+        #[arg(short = 'C', long)]
+        context: Option<usize>,
+
+        /// Context lines before matches
+        #[arg(short = 'B', long = "before-context")]
+        before_context: Option<usize>,
+
+        /// Context lines after matches
+        #[arg(short = 'A', long = "after-context")]
+        after_context: Option<usize>,
+
+        /// Max output line width (0 = unlimited)
+        #[arg(long, default_value = "200")]
+        max_line_width: usize,
+
+        /// Max results
+        #[arg(long, default_value = "50")]
+        max_results: usize,
+
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+
+        /// Only print file paths with matches
+        #[arg(short = 'l', long = "files-with-matches")]
+        files_with_matches: bool,
+
+        /// Case-insensitive search
+        #[arg(short = 'i', long = "ignore-case")]
+        ignore_case: bool,
+
+        /// Treat pattern as a fixed string (no regex interpretation)
+        #[arg(short = 'F', long = "fixed-strings")]
+        fixed_strings: bool,
+
+        /// Treat pattern as an extended regular expression (no literal fallback)
+        #[arg(short = 'E', long = "extended-regexp")]
+        extended_regexp: bool,
     },
 }
 
@@ -1157,5 +1241,182 @@ fn main() {
                 }
             }
         }
+
+        Commands::Memory { subcommand } => {
+            let config_dir = config_dirs.first().map(|(_, d)| d.clone())
+                .unwrap_or_else(sessions::default_claude_config_dir);
+            run_memory(subcommand, &config_dir);
+        }
     }
+}
+
+fn run_memory(cmd: MemoryCommands, config_dir: &Path) {
+    match cmd {
+        MemoryCommands::Dump { project, no_subdirs, json, files_only } => {
+            let cwd = resolve_project_path(&project);
+            let files = discover_memory_files(&cwd, config_dir, !no_subdirs);
+
+            if files.is_empty() {
+                eprintln!("No memory files found for {}", cwd.display());
+                std::process::exit(1);
+            }
+
+            if json {
+                let arr: Vec<_> = files.iter().map(|f| {
+                    let content = std::fs::read_to_string(&f.path).unwrap_or_default();
+                    let imported_by = f.imported_by.as_ref().map(|p| p.to_string_lossy().into_owned());
+                    json!({
+                        "path": f.path.to_string_lossy(),
+                        "source": f.source.label(),
+                        "importedBy": imported_by,
+                        "content": content,
+                    })
+                }).collect();
+                println!("{}", serde_json::to_string_pretty(&arr).unwrap());
+                return;
+            }
+
+            if files_only {
+                for f in &files {
+                    println!("{}", f.path.display());
+                }
+                return;
+            }
+
+            let mut first = true;
+            for f in &files {
+                if !first { println!(); }
+                first = false;
+                print_memory_header(f);
+                match std::fs::read_to_string(&f.path) {
+                    Ok(content) => print!("{}", content),
+                    Err(e) => eprintln!("warning: failed to read {}: {}", f.path.display(), e),
+                }
+            }
+            eprintln!("\n{} file{}", files.len(), if files.len() == 1 { "" } else { "s" });
+        }
+
+        MemoryCommands::Search {
+            pattern, project, no_subdirs,
+            context, before_context, after_context,
+            max_line_width, max_results, json,
+            files_with_matches, ignore_case, fixed_strings, extended_regexp,
+        } => {
+            let cwd = resolve_project_path(&project);
+            let files = discover_memory_files(&cwd, config_dir, !no_subdirs);
+
+            if files.is_empty() {
+                eprintln!("No memory files found for {}", cwd.display());
+                std::process::exit(1);
+            }
+
+            let flags = if ignore_case { "(?i)" } else { "" };
+            let escaped = regex::escape(&pattern);
+            let patterns: Vec<Regex> = if fixed_strings {
+                vec![Regex::new(&format!("{}{}", flags, escaped)).expect("invalid pattern")]
+            } else if extended_regexp {
+                match Regex::new(&format!("{}{}", flags, pattern)) {
+                    Ok(r) => vec![r],
+                    Err(e) => {
+                        eprintln!("error: invalid regex '{}': {}", pattern, e);
+                        std::process::exit(2);
+                    }
+                }
+            } else {
+                let literal = Regex::new(&format!("{}{}", flags, escaped)).expect("invalid pattern");
+                match Regex::new(&format!("{}{}", flags, pattern)) {
+                    Ok(r) => vec![r],
+                    Err(_) => vec![literal],
+                }
+            };
+
+            let ctx = context.unwrap_or(0);
+            let ctx_before = before_context.unwrap_or(ctx);
+            let ctx_after = after_context.unwrap_or(ctx);
+
+            let mut total = 0usize;
+            let mut first_out = true;
+            let stdout = std::io::stdout();
+            reset_truncation_state();
+
+            for f in &files {
+                if total >= max_results { break }
+                let content = match std::fs::read_to_string(&f.path) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let Some(matched) = find_matches(&content, &patterns, ctx_before, ctx_after) else { continue };
+
+                if files_with_matches {
+                    println!("{}", f.path.display());
+                    total += 1;
+                    continue;
+                }
+
+                if json {
+                    for (idx, ml) in matched.iter().enumerate() {
+                        println!("{}", json!({
+                            "path": f.path.to_string_lossy(),
+                            "source": f.source.label(),
+                            "matchIndex": idx,
+                            "isMatch": ml.is_match,
+                            "text": ml.line,
+                        }));
+                    }
+                    total += 1;
+                    continue;
+                }
+
+                let mut out = stdout.lock();
+                if !first_out { writeln!(out).unwrap(); }
+                first_out = false;
+                writeln!(out, "{}", format_memory_match_header(f)).unwrap();
+                for ml in &matched {
+                    let rendered = format_memory_line(&ml.line, ml.is_match, &patterns, max_line_width);
+                    writeln!(out, "{}", rendered).unwrap();
+                }
+                out.flush().unwrap();
+                total += 1;
+            }
+
+            if !files_with_matches && !json {
+                println!("\n{} file{} with matches of {} scanned", total,
+                    if total == 1 { "" } else { "s" }, files.len());
+                if total >= max_results {
+                    eprintln!("Hint: Result limit reached. Use --max-results to increase the limit.");
+                }
+                if get_did_truncate() {
+                    eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
+                }
+            }
+            if total == 0 { std::process::exit(1); }
+        }
+    }
+}
+
+fn resolve_project_path(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn print_memory_header(f: &MemoryFile) {
+    let label = console::style(format!("[{}]", f.source.label())).dim();
+    let path = console::style(f.path.display().to_string()).cyan().bold();
+    if let Some(ref imp) = f.imported_by {
+        let import_hint = console::style(format!("(imported by {})", imp.display())).dim();
+        println!("==> {} {} {}", path, label, import_hint);
+    } else {
+        println!("==> {} {}", path, label);
+    }
+}
+
+fn format_memory_match_header(f: &MemoryFile) -> String {
+    let label = console::style(format!("[{}]", f.source.label())).dim();
+    let path = console::style(f.path.display().to_string()).cyan().bold();
+    format!("{} {}", path, label)
+}
+
+fn format_memory_line(line: &str, is_match: bool, patterns: &[Regex], max_line_width: usize) -> String {
+    let marker = if is_match { ">" } else { " " };
+    let rendered = output::highlight_matches(line, patterns, max_line_width);
+    format!("  {} {}", marker, rendered)
 }
