@@ -369,7 +369,8 @@ mod tests {
             mk(Target::Assistant, "a1"),
             mk(Target::User, "u2"),         // 2nd user AFTER match
         ];
-        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
+        let filter: TargetSelector = [crate::parser::QualifiedTarget::bare(Target::User)]
+            .into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(1, "u1"), (2, "u2")]);
@@ -384,7 +385,8 @@ mod tests {
             mk(Target::Assistant, "a1"),
             mk(Target::User, "match_here"), // match at index 4
         ];
-        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
+        let filter: TargetSelector = [crate::parser::QualifiedTarget::bare(Target::User)]
+            .into_iter().collect();
         let ctx = gather_context(&contents, 4, &[-2, -1], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(-2, "u0"), (-1, "u1")]);
@@ -399,7 +401,8 @@ mod tests {
             mk(Target::User, "u1"),     // only 1 user after
             mk(Target::Assistant, "a1"),
         ];
-        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
+        let filter: TargetSelector = [crate::parser::QualifiedTarget::bare(Target::User)]
+            .into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2, 3], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(1, "u1")]);
@@ -423,8 +426,8 @@ mod tests {
             mk(Target::User, "u1"),       // 2nd
         ];
         let filter: TargetSelector = [
-            (Target::User, None),
-            (Target::Assistant, None),
+            crate::parser::QualifiedTarget::bare(Target::User),
+            crate::parser::QualifiedTarget::bare(Target::Assistant),
         ].into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();

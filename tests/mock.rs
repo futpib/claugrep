@@ -3788,8 +3788,8 @@ fn test_tail_output_format_matches_dump() {
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = strip_ansi(stdout(&out));
     assert!(text.contains("[user]"), "should have [user] label");
-    assert!(text.contains("[bash-command:Bash]"), "should have [bash-command:Bash] label");
-    assert!(text.contains("[bash-output:Bash]"), "should have [bash-output:Bash] label");
+    assert!(text.contains("[bash-command.Bash]"), "should have [bash-command.Bash] label");
+    assert!(text.contains("[bash-output.Bash]"), "should have [bash-output.Bash] label");
 }
 
 #[test]
@@ -4241,7 +4241,7 @@ fn test_search_alias_s() {
 }
 
 // `console::style(_).dim()` emits `\x1b[2m` as the opening escape.  Both
-// `dump` and `tail` wrap their `[target]` / `[target:tool]` labels in dim
+// `dump` and `tail` wrap their `[target]` / `[target.tool]` labels in dim
 // so they fade next to the content; tests pass `--color=always` since stdout
 // is piped (which would otherwise disable colors).
 #[test]
@@ -4313,7 +4313,7 @@ fn test_dump_multiline_content_starts_on_new_line() {
 
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = strip_ansi(stdout(&out));
-    assert!(text.contains("[bash-output:Bash]\nML_LINE_1"),
+    assert!(text.contains("[bash-output.Bash]\nML_LINE_1"),
         "label should be on its own line before multi-line content, got: {:?}", text);
 }
 
@@ -4335,7 +4335,7 @@ fn test_tail_multiline_content_starts_on_new_line() {
 
     assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
     let text = strip_ansi(stdout(&out));
-    assert!(text.contains("[bash-output:Bash]\nML_LINE_A"),
+    assert!(text.contains("[bash-output.Bash]\nML_LINE_A"),
         "label should be on its own line before multi-line content, got: {:?}", text);
 }
 

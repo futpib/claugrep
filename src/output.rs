@@ -223,12 +223,14 @@ fn format_context_record(
     max_width: usize,
 ) -> String {
     let time = format_timestamp(&c.timestamp);
-    let target = c.target.as_str();
-    let tool_suffix = c.tool_name.as_deref().map(|t| format!(":{}", t)).unwrap_or_default();
+    let label = crate::parser::QualifiedTarget {
+        target: c.target.clone(),
+        subtype: c.tool_name.clone(),
+    };
     let sign = if c.offset > 0 { "+" } else { "" };
     let header = style(format!(
-        "--- Context {}{} | {} | {}{} ---",
-        sign, c.offset, time, target, tool_suffix
+        "--- Context {}{} | {} | {} ---",
+        sign, c.offset, time, label
     )).dim().cyan().to_string();
 
     if let Some(ref diff) = c.edit_diff {
@@ -280,7 +282,7 @@ pub fn format_match(m: &SearchMatch, patterns: &[Regex], max_width: usize) -> St
     let time = format_timestamp(&m.timestamp);
     let header = style(format!(
         "--- Match #{} | session={} | {} | {} ---",
-        m.match_number, short_session, time, m.target.as_str()
+        m.match_number, short_session, time, m.target
     )).cyan().to_string();
 
     let mut lines = vec![header];
@@ -306,11 +308,13 @@ pub fn format_match(m: &SearchMatch, patterns: &[Regex], max_width: usize) -> St
 pub fn format_record(r: &ExtractedContent, max_width: usize) -> String {
     let short_session = &r.session_id[..r.session_id.len().min(8)];
     let time = format_timestamp(&r.timestamp);
-    let target = r.target.as_str();
-    let tool_suffix = r.tool_name.as_deref().map(|t| format!(":{}", t)).unwrap_or_default();
+    let label = crate::parser::QualifiedTarget {
+        target: r.target.clone(),
+        subtype: r.tool_name.clone(),
+    };
     let header = style(format!(
-        "--- session={} | {} | {}{} ---",
-        short_session, time, target, tool_suffix
+        "--- session={} | {} | {} ---",
+        short_session, time, label
     )).cyan().to_string();
 
     let text = if max_width == 0 || r.text.len() <= max_width {

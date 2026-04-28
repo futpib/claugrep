@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions, find_matches};
 use crate::output::{format_diff, format_edit_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
-use crate::parser::{Target, TargetSelector};
+use crate::parser::{QualifiedTarget, Target, TargetSelector};
 use crate::memory::{discover_memory_files, MemoryFile};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -473,83 +473,49 @@ queue-operation, last-prompt, agent-name, custom-title, permission-mode, \
 attachment, progress, pull-request.\n\n\
 Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
 
-/// Resolve a bare target name (kebab-case CLI string) to a `Target`. Returns
-/// `None` for unknown names. Caller is responsible for warning.
-fn parse_target_name(s: &str) -> Option<Target> {
-    Some(match s {
-        "user" => Target::User,
-        "assistant" => Target::Assistant,
-        "thinking" => Target::Thinking,
-        "bash-command" => Target::BashCommand,
-        "bash-output" => Target::BashOutput,
-        "tool-use" => Target::ToolUse,
-        "tool-result" => Target::ToolResult,
-        "subagent-prompt" => Target::SubagentPrompt,
-        "compact-summary" => Target::CompactSummary,
-        "system" => Target::System,
-        "file-history-snapshot" => Target::FileHistorySnapshot,
-        "queue-operation" => Target::QueueOperation,
-        "last-prompt" => Target::LastPrompt,
-        "agent-name" => Target::AgentName,
-        "custom-title" => Target::CustomTitle,
-        "permission-mode" => Target::PermissionMode,
-        "attachment" => Target::Attachment,
-        "progress" => Target::Progress,
-        "pull-request" => Target::PullRequest,
-        _ => return None,
-    })
-}
-
 fn parse_targets(s: &str) -> TargetSelector {
-    let mut pairs: Vec<(Target, Option<String>)> = vec![];
+    let mut items: Vec<QualifiedTarget> = vec![];
     for tok in s.split(',') {
         let tok = tok.trim();
         match tok {
             "" => continue,
             "default" => {
                 for t in default_targets() {
-                    pairs.push((t, None));
+                    items.push(QualifiedTarget::bare(t));
                 }
                 for (t, sub) in default_subtype_filters() {
-                    pairs.push((t, Some(sub.to_string())));
+                    items.push(QualifiedTarget {
+                        target: t,
+                        subtype: Some(sub.to_string()),
+                    });
                 }
                 continue;
             }
             "all" => {
                 for t in all_targets() {
-                    pairs.push((t, None));
+                    items.push(QualifiedTarget::bare(t));
                 }
                 continue;
             }
             _ => {}
         }
 
-        let (name, subtype) = match tok.split_once('.') {
-            Some((n, s)) => (n, Some(s.to_string())),
-            None => (tok, None),
-        };
-
-        let target = match parse_target_name(name) {
-            Some(t) => t,
-            None => {
-                eprintln!("warning: unknown target '{}', ignoring", name);
-                continue;
+        match tok.parse::<QualifiedTarget>() {
+            Ok(q) => items.push(q),
+            Err(msg) => {
+                eprintln!("warning: {}", msg);
+                // If the qualifier was the only problem, keep the bare target
+                // so the user still gets *something* matching the type they
+                // typed (consistent with prior behaviour).
+                if let Some((name, _)) = tok.split_once('.') {
+                    if let Ok(t) = name.parse::<Target>() {
+                        items.push(QualifiedTarget::bare(t));
+                    }
+                }
             }
-        };
-
-        if subtype.is_some() && !target.supports_subtypes() {
-            eprintln!(
-                "warning: target '{}' does not have subtypes; ignoring qualifier '.{}'",
-                name,
-                subtype.as_deref().unwrap()
-            );
-            pairs.push((target, None));
-            continue;
         }
-
-        pairs.push((target, subtype));
     }
-    pairs.into_iter().collect()
+    items.into_iter().collect()
 }
 
 fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
@@ -720,10 +686,10 @@ fn print_dump_record(content: &parser::ExtractedContent, json: bool, no_diff: bo
         }
         return;
     }
-    let label = match &content.tool_name {
-        Some(t) => format!("[{}:{}]", content.target.as_str(), t),
-        None => format!("[{}]", content.target.as_str()),
-    };
+    let label = format!("[{}]", QualifiedTarget {
+        target: content.target.clone(),
+        subtype: content.tool_name.clone(),
+    });
     let label = console::style(label).dim();
     if !no_diff {
         if let Some(ref diff) = content.edit_diff {

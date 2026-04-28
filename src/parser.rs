@@ -1,6 +1,8 @@
 use std::fs;
+use std::fmt;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::str::FromStr;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -26,9 +28,11 @@ pub enum Target {
     PullRequest,
 }
 
-impl Target {
-    pub fn as_str(&self) -> &'static str {
-        match self {
+/// CLI/display name for a target. Paired with `FromStr` below — these two
+/// impls are the single source of truth for the target ↔ string mapping.
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
             Target::User => "user",
             Target::Assistant => "assistant",
             Target::Thinking => "thinking",
@@ -48,9 +52,39 @@ impl Target {
             Target::Attachment => "attachment",
             Target::Progress => "progress",
             Target::PullRequest => "pull-request",
-        }
+        })
     }
+}
 
+impl FromStr for Target {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "user" => Target::User,
+            "assistant" => Target::Assistant,
+            "thinking" => Target::Thinking,
+            "bash-command" => Target::BashCommand,
+            "bash-output" => Target::BashOutput,
+            "tool-use" => Target::ToolUse,
+            "tool-result" => Target::ToolResult,
+            "subagent-prompt" => Target::SubagentPrompt,
+            "compact-summary" => Target::CompactSummary,
+            "system" => Target::System,
+            "file-history-snapshot" => Target::FileHistorySnapshot,
+            "queue-operation" => Target::QueueOperation,
+            "last-prompt" => Target::LastPrompt,
+            "agent-name" => Target::AgentName,
+            "custom-title" => Target::CustomTitle,
+            "permission-mode" => Target::PermissionMode,
+            "attachment" => Target::Attachment,
+            "progress" => Target::Progress,
+            "pull-request" => Target::PullRequest,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl Target {
     /// Whether this target carries a subtype that can appear after `.` in the
     /// `--targets` flag. True iff some extraction site sets `tool_name: Some(_)`
     /// for this target.
@@ -77,6 +111,54 @@ impl Target {
             | Target::CustomTitle
             | Target::PermissionMode => false,
         }
+    }
+}
+
+/// A target plus an optional subtype qualifier — the unit of `--targets`
+/// composition (`system`, `system.away_summary`, `tool-use.Edit`) and also
+/// the unit of label rendering in dump/tail/last/search output.
+///
+/// `Display` and `FromStr` are the canonical encoders/decoders; both use the
+/// `target.subtype` form so input and output round-trip.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct QualifiedTarget {
+    pub target: Target,
+    pub subtype: Option<String>,
+}
+
+impl QualifiedTarget {
+    pub fn bare(target: Target) -> Self {
+        Self { target, subtype: None }
+    }
+}
+
+impl fmt::Display for QualifiedTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.subtype {
+            None => write!(f, "{}", self.target),
+            Some(s) => write!(f, "{}.{}", self.target, s),
+        }
+    }
+}
+
+impl FromStr for QualifiedTarget {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name, subtype) = match s.split_once('.') {
+            Some((n, sub)) => (n, Some(sub.to_string())),
+            None => (s, None),
+        };
+        let target: Target = name.parse()
+            .map_err(|_| format!("unknown target '{}'", name))?;
+        if let Some(ref sub) = subtype {
+            if !target.supports_subtypes() {
+                return Err(format!(
+                    "target '{}' does not have subtypes; ignoring qualifier '.{}'",
+                    name, sub
+                ));
+            }
+        }
+        Ok(QualifiedTarget { target, subtype })
     }
 }
 
@@ -113,21 +195,21 @@ impl TargetSelector {
 
 }
 
-impl FromIterator<(Target, Option<String>)> for TargetSelector {
-    /// Build a selector from `(target, optional subtype)` pairs. Bare targets
-    /// (subtype `None`) win over qualified ones (subtype `Some(_)`) for the
-    /// same target — so `[(System, Some("away_summary")), (System, None)]`
-    /// yields a selector with no subtype filter on System.
-    fn from_iter<I: IntoIterator<Item = (Target, Option<String>)>>(iter: I) -> Self {
+impl FromIterator<QualifiedTarget> for TargetSelector {
+    /// Build a selector from a stream of qualified targets. Bare entries
+    /// (`subtype: None`) win over qualified ones (`subtype: Some(_)`) for the
+    /// same target — so `[System.away_summary, System]` yields a selector
+    /// with no subtype filter on System.
+    fn from_iter<I: IntoIterator<Item = QualifiedTarget>>(iter: I) -> Self {
         let mut sel = TargetSelector::new();
         let mut bare: HashSet<Target> = HashSet::new();
         let mut qualified: Vec<(Target, String)> = vec![];
 
-        for (t, sub) in iter {
-            sel.targets.insert(t.clone());
-            match sub {
-                None => { bare.insert(t); }
-                Some(s) => qualified.push((t, s)),
+        for q in iter {
+            sel.targets.insert(q.target.clone());
+            match q.subtype {
+                None => { bare.insert(q.target); }
+                Some(s) => qualified.push((q.target, s)),
             }
         }
 
@@ -1376,7 +1458,8 @@ mod tests {
 
     #[test]
     fn test_target_selector_bare_matches_any_subtype() {
-        let sel: TargetSelector = [(Target::System, None)].into_iter().collect();
+        let sel: TargetSelector = ["system".parse::<QualifiedTarget>().unwrap()]
+            .into_iter().collect();
         assert!(sel.matches(&Target::System, Some("away_summary")));
         assert!(sel.matches(&Target::System, Some("api_error")));
         assert!(sel.matches(&Target::System, None));
@@ -1386,8 +1469,8 @@ mod tests {
     #[test]
     fn test_target_selector_qualified_filters_by_subtype() {
         let sel: TargetSelector = [
-            (Target::System, Some("away_summary".to_string())),
-            (Target::System, Some("api_error".to_string())),
+            "system.away_summary".parse::<QualifiedTarget>().unwrap(),
+            "system.api_error".parse::<QualifiedTarget>().unwrap(),
         ].into_iter().collect();
         assert!(sel.matches(&Target::System, Some("away_summary")));
         assert!(sel.matches(&Target::System, Some("api_error")));
@@ -1398,8 +1481,8 @@ mod tests {
     #[test]
     fn test_target_selector_bare_wins_over_qualified() {
         let sel: TargetSelector = [
-            (Target::System, Some("away_summary".to_string())),
-            (Target::System, None),
+            "system.away_summary".parse::<QualifiedTarget>().unwrap(),
+            "system".parse::<QualifiedTarget>().unwrap(),
         ].into_iter().collect();
         assert!(sel.matches(&Target::System, Some("away_summary")));
         assert!(sel.matches(&Target::System, Some("anything_else")));
@@ -1409,8 +1492,8 @@ mod tests {
     #[test]
     fn test_target_selector_bare_wins_regardless_of_order() {
         let sel: TargetSelector = [
-            (Target::System, None),
-            (Target::System, Some("away_summary".to_string())),
+            "system".parse::<QualifiedTarget>().unwrap(),
+            "system.away_summary".parse::<QualifiedTarget>().unwrap(),
         ].into_iter().collect();
         assert!(sel.matches(&Target::System, Some("anything_else")));
     }
@@ -1423,5 +1506,72 @@ mod tests {
         assert!(!Target::User.supports_subtypes());
         assert!(!Target::Assistant.supports_subtypes());
         assert!(!Target::CompactSummary.supports_subtypes());
+    }
+
+    #[test]
+    fn test_target_display_fromstr_roundtrip() {
+        for t in [
+            Target::User, Target::Assistant, Target::Thinking,
+            Target::BashCommand, Target::BashOutput, Target::ToolUse,
+            Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
+            Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
+            Target::LastPrompt, Target::AgentName, Target::CustomTitle,
+            Target::PermissionMode, Target::Attachment, Target::Progress,
+            Target::PullRequest,
+        ] {
+            let s = t.to_string();
+            let parsed: Target = s.parse().unwrap_or_else(|_| panic!("failed to parse {}", s));
+            assert_eq!(parsed, t);
+        }
+    }
+
+    #[test]
+    fn test_target_fromstr_unknown_errors() {
+        assert!("totally-bogus".parse::<Target>().is_err());
+        assert!("".parse::<Target>().is_err());
+    }
+
+    #[test]
+    fn test_qualified_target_display_bare_and_qualified() {
+        assert_eq!(QualifiedTarget::bare(Target::System).to_string(), "system");
+        assert_eq!(
+            QualifiedTarget { target: Target::System, subtype: Some("away_summary".into()) }.to_string(),
+            "system.away_summary",
+        );
+        assert_eq!(
+            QualifiedTarget { target: Target::ToolUse, subtype: Some("Edit".into()) }.to_string(),
+            "tool-use.Edit",
+        );
+        // PR repo names contain '/', survives unchanged on the right of '.'
+        assert_eq!(
+            QualifiedTarget { target: Target::PullRequest, subtype: Some("owner/repo".into()) }.to_string(),
+            "pull-request.owner/repo",
+        );
+    }
+
+    #[test]
+    fn test_qualified_target_fromstr_roundtrip() {
+        for s in &[
+            "system",
+            "system.away_summary",
+            "tool-use.Edit",
+            "attachment.task_reminder",
+            "pull-request.owner/repo",
+        ] {
+            let q: QualifiedTarget = s.parse().unwrap();
+            assert_eq!(q.to_string(), *s);
+        }
+    }
+
+    #[test]
+    fn test_qualified_target_fromstr_rejects_subtype_on_typeless_target() {
+        let err = "user.foo".parse::<QualifiedTarget>().unwrap_err();
+        assert!(err.contains("does not have subtypes"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_qualified_target_fromstr_rejects_unknown_target() {
+        let err = "bogus.foo".parse::<QualifiedTarget>().unwrap_err();
+        assert!(err.contains("unknown target"), "got: {}", err);
     }
 }
