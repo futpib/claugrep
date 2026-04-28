@@ -987,6 +987,206 @@ fn test_last_targets_shorthand() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// search — TYPE.SUBTYPE qualifier syntax
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_targets_subtype_system_away_summary() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-system");
+    proj.session("sess-sub-sys")
+        .system_record("away_summary", Some("RECAP_TEXT_SUB_SYS"))
+        .system_record("api_error", Some("ERROR_TEXT_SUB_SYS"))
+        .system_record("turn_duration", Some("TURN_TEXT_SUB_SYS"))
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "TEXT_SUB_SYS", "-t", "system.away_summary", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_TEXT_SUB_SYS"), "should match away_summary");
+    assert!(!text.contains("ERROR_TEXT_SUB_SYS"), "should not match api_error");
+    assert!(!text.contains("TURN_TEXT_SUB_SYS"), "should not match turn_duration");
+}
+
+#[test]
+fn test_search_targets_subtype_tool_use_edit() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-tool-use");
+    proj.session("sess-sub-tu")
+        .edit("/file.rs", "OLD_TEXT_SUB_TU", "NEW_TEXT_SUB_TU")
+        .tool("Read", "file_path", "/path/UNIQUE_READ_SUB_TU", "")
+        .done();
+
+    // SUB_TU appears in both Edit (old_string) and Read (file_path)
+    let out = world.cmd()
+        .args(["search", "SUB_TU", "-t", "tool-use.Edit", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("OLD_TEXT_SUB_TU"), "should match Edit input");
+    assert!(!text.contains("UNIQUE_READ_SUB_TU"), "should not match Read input");
+}
+
+#[test]
+fn test_search_targets_subtype_pull_request_repo() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-pr");
+    proj.session("sess-sub-pr-1").pull_request("futpib/wanted-repo", 11).done();
+    proj.session("sess-sub-pr-2").pull_request("futpib/other-repo", 22).done();
+
+    let out = world.cmd()
+        .args(["search", "github.com", "-t", "pull-request.futpib/wanted-repo", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("futpib/wanted-repo"), "should match wanted repo");
+    assert!(!text.contains("futpib/other-repo"), "should not match other repo");
+}
+
+#[test]
+fn test_search_targets_subtype_multiple_same_target() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-multi");
+    proj.session("sess-sub-multi")
+        .system_record("away_summary", Some("RECAP_SUB_MULTI"))
+        .system_record("api_error", Some("ERROR_SUB_MULTI"))
+        .system_record("turn_duration", Some("TURN_SUB_MULTI"))
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "SUB_MULTI", "-t", "system.away_summary,system.api_error", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_SUB_MULTI"), "should match away_summary");
+    assert!(text.contains("ERROR_SUB_MULTI"), "should match api_error");
+    assert!(!text.contains("TURN_SUB_MULTI"), "should not match turn_duration");
+}
+
+#[test]
+fn test_search_targets_subtype_bare_wins() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-bare-wins");
+    proj.session("sess-sub-bare")
+        .system_record("away_summary", Some("RECAP_BARE_WINS"))
+        .system_record("api_error", Some("ERROR_BARE_WINS"))
+        .done();
+
+    // Bare `system` should override the qualified `system.away_summary`.
+    let out = world.cmd()
+        .args(["search", "BARE_WINS", "-t", "system,system.away_summary", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_BARE_WINS"), "bare system should match recap");
+    assert!(text.contains("ERROR_BARE_WINS"), "bare system should match api_error too");
+}
+
+#[test]
+fn test_search_targets_subtype_bare_wins_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-bare-via-all");
+    proj.session("sess-sub-all")
+        .system_record("away_summary", Some("RECAP_VIA_ALL"))
+        .system_record("api_error", Some("ERROR_VIA_ALL"))
+        .done();
+
+    // `all` includes bare system, which beats the qualifier.
+    let out = world.cmd()
+        .args(["search", "VIA_ALL", "-t", "all,system.away_summary", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_VIA_ALL"), "all should match recap");
+    assert!(text.contains("ERROR_VIA_ALL"), "all should still match api_error");
+}
+
+#[test]
+fn test_search_targets_subtype_unknown_value_no_match() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-unknown-value");
+    proj.session("sess-sub-unk")
+        .system_record("away_summary", Some("RECAP_UNK_VAL"))
+        .done();
+
+    // Unknown subtype value: silent, just no match.
+    let out = world.cmd()
+        .args(["search", "UNK_VAL", "-t", "system.totally_made_up", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(!text.contains("RECAP_UNK_VAL"), "unknown subtype should not match anything");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("warning"), "unknown subtype should not warn, got stderr: {}", stderr);
+}
+
+#[test]
+fn test_search_default_includes_away_summary_but_not_other_system_subtypes() {
+    let world = MockWorld::new();
+    let proj = world.project("default-recaps");
+    proj.session("sess-def-recap")
+        .system_record("away_summary", Some("RECAP_DEFAULT_INC"))
+        .system_record("api_error", Some("ERROR_DEFAULT_INC"))
+        .system_record("stop_hook_summary", Some("HOOK_DEFAULT_INC"))
+        .done();
+
+    // Default targets (no -t flag) should find the recap...
+    let out = world.cmd()
+        .args(["search", "DEFAULT_INC", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_DEFAULT_INC"),
+        "default should match away_summary, got: {}", text);
+    assert!(!text.contains("ERROR_DEFAULT_INC"),
+        "default should NOT match api_error, got: {}", text);
+    assert!(!text.contains("HOOK_DEFAULT_INC"),
+        "default should NOT match stop_hook_summary, got: {}", text);
+}
+
+#[test]
+fn test_search_default_plus_bare_system_disables_subtype_filter() {
+    // Adding bare `system` to defaults should pull in ALL system subtypes,
+    // overriding the implicit away_summary filter.
+    let world = MockWorld::new();
+    let proj = world.project("default-plus-bare-sys");
+    proj.session("sess-def-bare")
+        .system_record("away_summary", Some("RECAP_DEF_BARE"))
+        .system_record("api_error", Some("ERROR_DEF_BARE"))
+        .done();
+
+    let out = world.cmd()
+        .args(["search", "DEF_BARE", "-t", "default,system", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("RECAP_DEF_BARE"), "should match recap");
+    assert!(text.contains("ERROR_DEF_BARE"), "bare system should expand the implicit filter");
+}
+
+#[test]
+fn test_search_targets_subtype_on_typeless_target_warns_keeps_bare() {
+    let world = MockWorld::new();
+    let proj = world.project("subtype-typeless");
+    proj.session("sess-sub-typeless")
+        .user_message("USER_TYPELESS_QUAL")
+        .done();
+
+    // `user` doesn't have subtypes — qualifier is dropped with a warning.
+    let out = world.cmd()
+        .args(["search", "TYPELESS_QUAL", "-t", "user.foo", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("USER_TYPELESS_QUAL"), "bare user should still match");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("does not have subtypes"),
+        "should warn about typeless qualifier, got stderr: {}", stderr);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // search — other untested flags
 // ═════════════════════════════════════════════════════════════════════════════
 

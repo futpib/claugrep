@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use regex::Regex;
 
-use crate::parser::{extract_content_opts, EditDiff, ExtractedContent, Target};
+use crate::parser::{extract_content_opts, EditDiff, ExtractedContent, Target, TargetSelector};
 use crate::sessions::SessionFile;
 
 pub struct MatchedLine {
@@ -41,8 +41,9 @@ pub struct SearchMatch {
 #[derive(Clone)]
 pub struct SearchOptions {
     pub patterns: Vec<Regex>,
-    /// Targets that are candidates for *matching* the pattern.
-    pub targets: HashSet<Target>,
+    /// Targets (and optional subtype filters) that records must satisfy to
+    /// be considered for *matching* the pattern.
+    pub targets: TargetSelector,
     /// Targets to extract from session files. Must be a superset of `targets`.
     /// When record-level context is enabled this is usually the universe of
     /// known types so that offsets can walk over any record.
@@ -62,9 +63,9 @@ pub struct SearchOptions {
     /// Sorted signed offsets of records to collect as context around each match.
     /// Does not include 0 (the match itself, which is always shown).
     pub context_offsets: Vec<i32>,
-    /// When set, record-context offsets count (and display) only records of
-    /// these types. Intermediate records of other types are hidden.
-    pub context_type_filter: Option<HashSet<Target>>,
+    /// When set, record-context offsets count (and display) only records that
+    /// pass this selector. Intermediate records are hidden.
+    pub context_type_filter: Option<TargetSelector>,
 }
 
 pub fn find_matches(
@@ -109,13 +110,13 @@ pub fn find_matches(
 /// Gather records neighboring the match at `match_index` in `contents`.
 ///
 /// When `type_filter` is `None`, offsets count over every record in `contents`.
-/// When `Some`, offsets count only records whose target is in the filter; records
-/// of other types are skipped entirely (they are not displayed as context either).
+/// When `Some`, offsets count only records that pass the selector; records
+/// that don't pass are skipped entirely (they are not displayed as context either).
 pub fn gather_context(
     contents: &[ExtractedContent],
     match_index: usize,
     offsets: &[i32],
-    type_filter: Option<&HashSet<Target>>,
+    type_filter: Option<&TargetSelector>,
     keep_raw: bool,
 ) -> Vec<ContextRecord> {
     if offsets.is_empty() {
@@ -149,7 +150,7 @@ pub fn gather_context(
                 let mut count: i32 = 0;
                 let mut i = match_index + 1;
                 while i < contents.len() && count < max_pos {
-                    if filter.contains(&contents[i].target) {
+                    if filter.matches(&contents[i].target, contents[i].tool_name.as_deref()) {
                         count += 1;
                         if offset_set.contains(&count) {
                             result.push(make_context_record(&contents[i], count, keep_raw));
@@ -164,7 +165,7 @@ pub fn gather_context(
                 let mut i = match_index;
                 while i > 0 && count > min_neg {
                     i -= 1;
-                    if filter.contains(&contents[i].target) {
+                    if filter.matches(&contents[i].target, contents[i].tool_name.as_deref()) {
                         count -= 1;
                         if offset_set.contains(&count) {
                             result.push(make_context_record(&contents[i], count, keep_raw));
@@ -217,7 +218,7 @@ where
                 break;
             }
 
-            if !options.targets.contains(&content.target) {
+            if !options.targets.matches(&content.target, content.tool_name.as_deref()) {
                 continue;
             }
 
@@ -368,7 +369,7 @@ mod tests {
             mk(Target::Assistant, "a1"),
             mk(Target::User, "u2"),         // 2nd user AFTER match
         ];
-        let filter: HashSet<Target> = [Target::User].into_iter().collect();
+        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(1, "u1"), (2, "u2")]);
@@ -383,7 +384,7 @@ mod tests {
             mk(Target::Assistant, "a1"),
             mk(Target::User, "match_here"), // match at index 4
         ];
-        let filter: HashSet<Target> = [Target::User].into_iter().collect();
+        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
         let ctx = gather_context(&contents, 4, &[-2, -1], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(-2, "u0"), (-1, "u1")]);
@@ -398,7 +399,7 @@ mod tests {
             mk(Target::User, "u1"),     // only 1 user after
             mk(Target::Assistant, "a1"),
         ];
-        let filter: HashSet<Target> = [Target::User].into_iter().collect();
+        let filter: TargetSelector = [(Target::User, None)].into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2, 3], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(1, "u1")]);
@@ -421,7 +422,10 @@ mod tests {
             mk(Target::BashOutput, "b1"),
             mk(Target::User, "u1"),       // 2nd
         ];
-        let filter: HashSet<Target> = [Target::User, Target::Assistant].into_iter().collect();
+        let filter: TargetSelector = [
+            (Target::User, None),
+            (Target::Assistant, None),
+        ].into_iter().collect();
         let ctx = gather_context(&contents, 0, &[1, 2], Some(&filter), false);
         let texts: Vec<(i32, &str)> = ctx.iter().map(|c| (c.offset, c.text.as_str())).collect();
         assert_eq!(texts, vec![(1, "a0"), (2, "u1")]);

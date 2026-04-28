@@ -1,7 +1,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
@@ -49,6 +49,96 @@ impl Target {
             Target::Progress => "progress",
             Target::PullRequest => "pull-request",
         }
+    }
+
+    /// Whether this target carries a subtype that can appear after `.` in the
+    /// `--targets` flag. True iff some extraction site sets `tool_name: Some(_)`
+    /// for this target.
+    pub fn supports_subtypes(&self) -> bool {
+        match self {
+            Target::System
+            | Target::Progress
+            | Target::Attachment
+            | Target::ToolUse
+            | Target::ToolResult
+            | Target::BashOutput
+            | Target::BashCommand
+            | Target::QueueOperation
+            | Target::PullRequest => true,
+
+            Target::User
+            | Target::Assistant
+            | Target::Thinking
+            | Target::SubagentPrompt
+            | Target::CompactSummary
+            | Target::FileHistorySnapshot
+            | Target::LastPrompt
+            | Target::AgentName
+            | Target::CustomTitle
+            | Target::PermissionMode => false,
+        }
+    }
+}
+
+/// Filter built from a `--targets` flag value.
+///
+/// Combines a set of bare targets with optional per-target subtype allow-lists.
+/// A target with an entry in `subtype_filters` only matches records whose
+/// `tool_name` is in the allow-list. A target without an entry matches every
+/// record of that target.
+#[derive(Clone, Debug, Default)]
+pub struct TargetSelector {
+    pub targets: HashSet<Target>,
+    pub subtype_filters: HashMap<Target, HashSet<String>>,
+}
+
+impl TargetSelector {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Test whether a record passes the selector.
+    pub fn matches(&self, target: &Target, tool_name: Option<&str>) -> bool {
+        if !self.targets.contains(target) {
+            return false;
+        }
+        match self.subtype_filters.get(target) {
+            None => true,
+            Some(allowed) => match tool_name {
+                Some(s) => allowed.contains(s),
+                None => false,
+            },
+        }
+    }
+
+}
+
+impl FromIterator<(Target, Option<String>)> for TargetSelector {
+    /// Build a selector from `(target, optional subtype)` pairs. Bare targets
+    /// (subtype `None`) win over qualified ones (subtype `Some(_)`) for the
+    /// same target — so `[(System, Some("away_summary")), (System, None)]`
+    /// yields a selector with no subtype filter on System.
+    fn from_iter<I: IntoIterator<Item = (Target, Option<String>)>>(iter: I) -> Self {
+        let mut sel = TargetSelector::new();
+        let mut bare: HashSet<Target> = HashSet::new();
+        let mut qualified: Vec<(Target, String)> = vec![];
+
+        for (t, sub) in iter {
+            sel.targets.insert(t.clone());
+            match sub {
+                None => { bare.insert(t); }
+                Some(s) => qualified.push((t, s)),
+            }
+        }
+
+        for (t, s) in qualified {
+            if bare.contains(&t) {
+                continue;
+            }
+            sel.subtype_filters.entry(t).or_default().insert(s);
+        }
+
+        sel
     }
 }
 
@@ -1282,5 +1372,56 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", false);
         let pg = contents.iter().find(|c| c.target == Target::Progress).unwrap();
         assert!(pg.text.contains("UNIQUE_UNKNOWN_PROG"));
+    }
+
+    #[test]
+    fn test_target_selector_bare_matches_any_subtype() {
+        let sel: TargetSelector = [(Target::System, None)].into_iter().collect();
+        assert!(sel.matches(&Target::System, Some("away_summary")));
+        assert!(sel.matches(&Target::System, Some("api_error")));
+        assert!(sel.matches(&Target::System, None));
+        assert!(!sel.matches(&Target::Assistant, None));
+    }
+
+    #[test]
+    fn test_target_selector_qualified_filters_by_subtype() {
+        let sel: TargetSelector = [
+            (Target::System, Some("away_summary".to_string())),
+            (Target::System, Some("api_error".to_string())),
+        ].into_iter().collect();
+        assert!(sel.matches(&Target::System, Some("away_summary")));
+        assert!(sel.matches(&Target::System, Some("api_error")));
+        assert!(!sel.matches(&Target::System, Some("turn_duration")));
+        assert!(!sel.matches(&Target::System, None));
+    }
+
+    #[test]
+    fn test_target_selector_bare_wins_over_qualified() {
+        let sel: TargetSelector = [
+            (Target::System, Some("away_summary".to_string())),
+            (Target::System, None),
+        ].into_iter().collect();
+        assert!(sel.matches(&Target::System, Some("away_summary")));
+        assert!(sel.matches(&Target::System, Some("anything_else")));
+        assert!(sel.matches(&Target::System, None));
+    }
+
+    #[test]
+    fn test_target_selector_bare_wins_regardless_of_order() {
+        let sel: TargetSelector = [
+            (Target::System, None),
+            (Target::System, Some("away_summary".to_string())),
+        ].into_iter().collect();
+        assert!(sel.matches(&Target::System, Some("anything_else")));
+    }
+
+    #[test]
+    fn test_target_supports_subtypes() {
+        assert!(Target::System.supports_subtypes());
+        assert!(Target::ToolUse.supports_subtypes());
+        assert!(Target::PullRequest.supports_subtypes());
+        assert!(!Target::User.supports_subtypes());
+        assert!(!Target::Assistant.supports_subtypes());
+        assert!(!Target::CompactSummary.supports_subtypes());
     }
 }

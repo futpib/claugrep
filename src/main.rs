@@ -16,7 +16,7 @@ use serde_json::json;
 use crate::sessions::{discover_sessions, discover_all_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
 use crate::search::{search_sessions, SearchOptions, find_matches};
 use crate::output::{format_diff, format_edit_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
-use crate::parser::Target;
+use crate::parser::{Target, TargetSelector};
 use crate::memory::{discover_memory_files, MemoryFile};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -64,8 +64,8 @@ enum Commands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Content types to include (comma-separated: user,assistant,thinking,bash-command,bash-output,tool-use,tool-result,subagent-prompt,compact-summary,system,file-history-snapshot,queue-operation,last-prompt,agent-name,custom-title,permission-mode,attachment,progress; or "default" for standard types, "all" for everything including internals)
-        #[arg(short = 't', long, default_value = "default")]
+        /// Content types to include (use TYPE.SUBTYPE for subtype filters; see --help)
+        #[arg(short = 't', long, default_value = "default", long_help = TARGETS_HELP)]
         targets: String,
 
         /// Project path (default: current directory)
@@ -172,8 +172,8 @@ enum Commands {
         #[arg(long)]
         project: Option<PathBuf>,
 
-        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
-        #[arg(short = 't', long, default_value = "default")]
+        /// Content types to include (use TYPE.SUBTYPE for subtype filters; see --help)
+        #[arg(short = 't', long, default_value = "default", long_help = TARGETS_HELP)]
         targets: String,
 
         /// Max output line width (0 = unlimited)
@@ -210,8 +210,8 @@ enum Commands {
         #[arg(long, default_value = ".")]
         project: PathBuf,
 
-        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
-        #[arg(short = 't', long, default_value = "default")]
+        /// Content types to include (use TYPE.SUBTYPE for subtype filters; see --help)
+        #[arg(short = 't', long, default_value = "default", long_help = TARGETS_HELP)]
         targets: String,
 
         /// Show raw key/value format for Edit tool matches instead of unified diff
@@ -245,8 +245,8 @@ enum Commands {
         #[arg(long, default_value = ".")]
         project: PathBuf,
 
-        /// Content types to include (comma-separated; or "default" for standard types, "all" for everything including internals)
-        #[arg(short = 't', long, default_value = "default")]
+        /// Content types to include (use TYPE.SUBTYPE for subtype filters; see --help)
+        #[arg(short = 't', long, default_value = "default", long_help = TARGETS_HELP)]
         targets: String,
 
         /// Show raw key/value format for Edit tool matches instead of unified diff
@@ -353,6 +353,17 @@ fn default_targets() -> HashSet<Target> {
     ].into_iter().collect()
 }
 
+/// Subtype-narrowed targets included in `--targets default`. These are bare
+/// targets we don't want in defaults wholesale (too noisy), but for which one
+/// or two specific subtypes are user-relevant — e.g. `system` is dominated by
+/// hook/turn telemetry, but `system.away_summary` (the recap shown when
+/// resuming a session) is worth surfacing.
+fn default_subtype_filters() -> Vec<(Target, &'static str)> {
+    vec![
+        (Target::System, "away_summary"),
+    ]
+}
+
 fn all_targets() -> HashSet<Target> {
     let mut t = default_targets();
     t.insert(Target::System);
@@ -448,36 +459,97 @@ fn merge_record_context(
     Ok(offsets.into_iter().collect())
 }
 
-fn parse_targets(s: &str) -> HashSet<Target> {
-    let mut out: HashSet<Target> = HashSet::new();
+/// Help text for the `--targets` flag, shared across all subcommands.
+const TARGETS_HELP: &str = "\
+Content types to include (comma-separated). Use TYPE.SUBTYPE to filter further \
+(e.g. system.away_summary, tool-use.Edit, attachment.task_reminder, \
+pull-request.owner/repo). A bare TYPE matches all subtypes; bare always wins \
+over qualified for the same TYPE. Subtypes apply to: tool-use, tool-result, \
+bash-output, bash-command, system, progress, attachment, queue-operation, \
+pull-request.\n\n\
+Types: user, assistant, thinking, bash-command, bash-output, tool-use, \
+tool-result, subagent-prompt, compact-summary, system, file-history-snapshot, \
+queue-operation, last-prompt, agent-name, custom-title, permission-mode, \
+attachment, progress, pull-request.\n\n\
+Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
+
+/// Resolve a bare target name (kebab-case CLI string) to a `Target`. Returns
+/// `None` for unknown names. Caller is responsible for warning.
+fn parse_target_name(s: &str) -> Option<Target> {
+    Some(match s {
+        "user" => Target::User,
+        "assistant" => Target::Assistant,
+        "thinking" => Target::Thinking,
+        "bash-command" => Target::BashCommand,
+        "bash-output" => Target::BashOutput,
+        "tool-use" => Target::ToolUse,
+        "tool-result" => Target::ToolResult,
+        "subagent-prompt" => Target::SubagentPrompt,
+        "compact-summary" => Target::CompactSummary,
+        "system" => Target::System,
+        "file-history-snapshot" => Target::FileHistorySnapshot,
+        "queue-operation" => Target::QueueOperation,
+        "last-prompt" => Target::LastPrompt,
+        "agent-name" => Target::AgentName,
+        "custom-title" => Target::CustomTitle,
+        "permission-mode" => Target::PermissionMode,
+        "attachment" => Target::Attachment,
+        "progress" => Target::Progress,
+        "pull-request" => Target::PullRequest,
+        _ => return None,
+    })
+}
+
+fn parse_targets(s: &str) -> TargetSelector {
+    let mut pairs: Vec<(Target, Option<String>)> = vec![];
     for tok in s.split(',') {
-        match tok.trim() {
+        let tok = tok.trim();
+        match tok {
             "" => continue,
-            "default" => out.extend(default_targets()),
-            "all" => out.extend(all_targets()),
-            "user" => { out.insert(Target::User); }
-            "assistant" => { out.insert(Target::Assistant); }
-            "thinking" => { out.insert(Target::Thinking); }
-            "bash-command" => { out.insert(Target::BashCommand); }
-            "bash-output" => { out.insert(Target::BashOutput); }
-            "tool-use" => { out.insert(Target::ToolUse); }
-            "tool-result" => { out.insert(Target::ToolResult); }
-            "subagent-prompt" => { out.insert(Target::SubagentPrompt); }
-            "compact-summary" => { out.insert(Target::CompactSummary); }
-            "system" => { out.insert(Target::System); }
-            "file-history-snapshot" => { out.insert(Target::FileHistorySnapshot); }
-            "queue-operation" => { out.insert(Target::QueueOperation); }
-            "last-prompt" => { out.insert(Target::LastPrompt); }
-            "agent-name" => { out.insert(Target::AgentName); }
-            "custom-title" => { out.insert(Target::CustomTitle); }
-            "permission-mode" => { out.insert(Target::PermissionMode); }
-            "attachment" => { out.insert(Target::Attachment); }
-            "progress" => { out.insert(Target::Progress); }
-            "pull-request" => { out.insert(Target::PullRequest); }
-            other => eprintln!("warning: unknown target '{}', ignoring", other),
+            "default" => {
+                for t in default_targets() {
+                    pairs.push((t, None));
+                }
+                for (t, sub) in default_subtype_filters() {
+                    pairs.push((t, Some(sub.to_string())));
+                }
+                continue;
+            }
+            "all" => {
+                for t in all_targets() {
+                    pairs.push((t, None));
+                }
+                continue;
+            }
+            _ => {}
         }
+
+        let (name, subtype) = match tok.split_once('.') {
+            Some((n, s)) => (n, Some(s.to_string())),
+            None => (tok, None),
+        };
+
+        let target = match parse_target_name(name) {
+            Some(t) => t,
+            None => {
+                eprintln!("warning: unknown target '{}', ignoring", name);
+                continue;
+            }
+        };
+
+        if subtype.is_some() && !target.supports_subtypes() {
+            eprintln!(
+                "warning: target '{}' does not have subtypes; ignoring qualifier '.{}'",
+                name,
+                subtype.as_deref().unwrap()
+            );
+            pairs.push((target, None));
+            continue;
+        }
+
+        pairs.push((target, subtype));
     }
-    out
+    pairs.into_iter().collect()
 }
 
 fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
@@ -733,14 +805,14 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            let context_type_filter: Option<HashSet<Target>> = records_type
+            let context_type_filter: Option<TargetSelector> = records_type
                 .as_deref()
                 .map(parse_targets);
 
             // When record-context is requested, extract all known types so offsets
             // can walk over any record; otherwise just the -t targets are enough.
             let extract_targets: HashSet<Target> = if context_offsets.is_empty() {
-                targets.clone()
+                targets.targets.clone()
             } else {
                 all_targets()
             };
@@ -1041,13 +1113,14 @@ fn main() {
             for session in &all_sessions {
                 let contents = parser::extract_content_opts(
                     &session.file_path,
-                    &target_set,
+                    &target_set.targets,
                     &session.session_id,
                     session.is_subagent,
                     json,
                 );
                 all_records.extend(contents);
             }
+            all_records.retain(|c| target_set.matches(&c.target, c.tool_name.as_deref()));
 
             // Sort by timestamp (ISO 8601 lexicographic order works)
             all_records.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -1245,12 +1318,13 @@ fn main() {
                 }
                 all_contents.extend(parser::extract_content_opts(
                     &s.file_path,
-                    &target_set,
+                    &target_set.targets,
                     &s.session_id,
                     s.is_subagent,
                     json,
                 ));
             }
+            all_contents.retain(|c| target_set.matches(&c.target, c.tool_name.as_deref()));
 
             all_contents.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
@@ -1294,12 +1368,13 @@ fn main() {
                 }
                 all_contents.extend(parser::extract_content_opts(
                     &s.file_path,
-                    &target_set,
+                    &target_set.targets,
                     &s.session_id,
                     s.is_subagent,
                     json,
                 ));
             }
+            all_contents.retain(|c| target_set.matches(&c.target, c.tool_name.as_deref()));
 
             all_contents.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
 
@@ -1355,13 +1430,15 @@ fn main() {
                                     parser::extract_from_entry(
                                         &entry,
                                         &tool_use_map,
-                                        &target_set,
+                                        &target_set.targets,
                                         &main_session.session_id,
                                         main_session.is_subagent,
                                         &mut results,
                                     );
                                     for content in &results {
-                                        print_content(content);
+                                        if target_set.matches(&content.target, content.tool_name.as_deref()) {
+                                            print_content(content);
+                                        }
                                     }
                                     let _ = std::io::stdout().flush();
                                 }
