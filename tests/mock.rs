@@ -377,6 +377,17 @@ impl SessionBuilder {
         self
     }
 
+    /// Write an ai-title record.
+    fn ai_title(mut self, title: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "ai-title",
+            "aiTitle": title,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     /// Write a permission-mode record.
     fn permission_mode(mut self, mode: &str) -> Self {
         let sid = self.session_id.clone();
@@ -3285,6 +3296,99 @@ fn test_custom_title_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "custom-title records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ai-title target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_ai_title() {
+    let world = MockWorld::new();
+    let proj = world.project("at-search");
+    proj.session("sess-at")
+        .user_message("hello")
+        .ai_title("UNIQUE_AI_TITLE_XYZ")
+        .assistant_message("hi")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_AI_TITLE_XYZ", "-t", "ai-title", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t ai-title should find ai-title records");
+
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_AI_TITLE_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "ai-title records should not appear in default targets");
+}
+
+#[test]
+fn test_search_ai_title_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("at-all");
+    proj.session("sess-ata")
+        .user_message("hello")
+        .ai_title("UNIQUE_AT_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_AT_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include ai-title records");
+}
+
+#[test]
+fn test_dump_ai_title() {
+    let world = MockWorld::new();
+    let proj = world.project("at-dump");
+    proj.session("sess-atd")
+        .user_message("hello user")
+        .ai_title("my-ai-title")
+        .assistant_message("hello assistant")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "-t", "ai-title", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(text.contains("my-ai-title"), "dump should show ai title");
+    assert!(!text.contains("hello user"), "should not show user messages");
+    assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_ai_title_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("at-nowarn");
+    proj.session("sess-atw")
+        .user_message("hello")
+        .ai_title("some-title")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "ai-title records should not trigger unrecognized record warnings");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

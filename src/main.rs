@@ -371,6 +371,7 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::LastPrompt);
     t.insert(Target::AgentName);
     t.insert(Target::CustomTitle);
+    t.insert(Target::AiTitle);
     t.insert(Target::PermissionMode);
     t.insert(Target::Attachment);
     t.insert(Target::Progress);
@@ -469,7 +470,7 @@ bash-output, bash-command, system, progress, attachment, queue-operation, \
 pull-request.\n\n\
 Types: user, assistant, thinking, bash-command, bash-output, tool-use, \
 tool-result, subagent-prompt, compact-summary, system, file-history-snapshot, \
-queue-operation, last-prompt, agent-name, custom-title, permission-mode, \
+queue-operation, last-prompt, agent-name, custom-title, ai-title, permission-mode, \
 attachment, progress, pull-request.\n\n\
 Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
 
