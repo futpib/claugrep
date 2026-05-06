@@ -35,7 +35,7 @@ fn first_match_pos(line: &str, patterns: &[Regex]) -> Option<(usize, usize)> {
     }).min_by_key(|(start, _)| *start)
 }
 
-fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, bool) {
+pub fn truncate_line(line: &str, patterns: &[Regex], max_width: usize) -> (String, bool) {
     let char_count = line.chars().count();
     if max_width == 0 || char_count <= max_width {
         return (line.to_string(), false);

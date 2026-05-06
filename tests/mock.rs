@@ -71,6 +71,15 @@ impl MockWorld {
         fs::create_dir_all(&session_dir).unwrap();
         MockProject { project_path, session_dir }
     }
+
+    /// Create a real on-disk directory under the mock HOME and return its
+    /// canonicalized path. Used by `memory` tests, where `discover_memory_files`
+    /// walks the actual filesystem looking for CLAUDE.md ancestors.
+    fn real_project(&self, name: &str) -> PathBuf {
+        let path = self.home.path().join("real-projects").join(name);
+        fs::create_dir_all(&path).unwrap();
+        path.canonicalize().unwrap()
+    }
 }
 
 struct MockProject {
@@ -2062,8 +2071,8 @@ fn test_config_dir_flag() {
 
 #[test]
 fn test_claudex_account_auto_discover() {
-    // Sessions under a claudex account dir should be found automatically by `last`
-    // even without any flags (auto-discovery of accounts).
+    // Sessions under a claudex account dir should be found automatically by `last
+    // --all-projects` (auto-discovery of accounts).
     let world = MockWorld::new();
     let proj = world.account_project("myaccount", "auto-disc");
     proj.session("auto-disc-sess")
@@ -2072,7 +2081,7 @@ fn test_claudex_account_auto_discover() {
 
     let out = world
         .cmd()
-        .args(["last"])
+        .args(["last", "--all-projects"])
         .output()
         .unwrap();
 
@@ -2099,15 +2108,15 @@ fn test_account_flag_filters() {
         .user_message("ACCOUNT_FILTER_FOO_CONTENT")
         .done();
 
-    // Without --account: both should appear
-    let out_all = world.cmd().args(["last"]).output().unwrap();
+    // Without --account: both should appear (use --all-projects to scope across projects)
+    let out_all = world.cmd().args(["last", "--all-projects"]).output().unwrap();
     assert!(out_all.status.success(), "stderr: {}", String::from_utf8_lossy(&out_all.stderr));
     let text_all = strip_ansi(stdout(&out_all));
     assert!(text_all.contains("ACCOUNT_FILTER_DEFAULT_CONTENT"), "default sessions should appear without --account");
     assert!(text_all.contains("ACCOUNT_FILTER_FOO_CONTENT"), "account sessions should appear without --account");
 
     // With --account foo: only foo sessions
-    let out_foo = world.cmd().args(["--account", "foo", "last"]).output().unwrap();
+    let out_foo = world.cmd().args(["--account", "foo", "last", "--all-projects"]).output().unwrap();
     assert!(out_foo.status.success(), "stderr: {}", String::from_utf8_lossy(&out_foo.stderr));
     let text_foo = strip_ansi(stdout(&out_foo));
     assert!(text_foo.contains("ACCOUNT_FILTER_FOO_CONTENT"), "foo account session should appear with --account foo");
@@ -4686,4 +4695,482 @@ fn test_search_records_clamps_at_session_boundary() {
     assert!(raw.contains("Match"), "should still produce a match: {:?}", raw);
     assert!(!raw.contains("Context -"), "no records before, no Context - line: {:?}", raw);
     assert!(!raw.contains("Context +"), "no records after, no Context + line: {:?}", raw);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// global-flag uniformity: --all-projects / -P / --session / --subagents are
+// rejected on commands that don't make sense for them, and shared across the
+// commands that do.
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Multi-project flags must error with a clear message on dump/tail/memory.
+#[test]
+fn test_dump_rejects_all_projects() {
+    let world = MockWorld::new();
+    let out = world.cmd().args(["dump", "--all-projects"]).output().unwrap();
+    assert!(!out.status.success(), "dump --all-projects should error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not supported"), "expected rejection message, got: {}", err);
+}
+
+#[test]
+fn test_dump_rejects_project_regexp() {
+    let world = MockWorld::new();
+    let out = world.cmd().args(["dump", "-P", "anything"]).output().unwrap();
+    assert!(!out.status.success(), "dump -P should error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not supported"), "expected rejection message, got: {}", err);
+}
+
+#[test]
+fn test_tail_rejects_all_projects() {
+    let world = MockWorld::new();
+    let out = world.cmd().args(["tail", "--all-projects"]).output().unwrap();
+    assert!(!out.status.success(), "tail --all-projects should error");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("not supported"), "expected rejection message, got: {}", err);
+}
+
+#[test]
+fn test_tail_follow_rejects_all_projects() {
+    // -f + --all-projects is blocked transitively by the tail rejection.
+    let world = MockWorld::new();
+    let out = world.cmd().args(["tail", "-f", "--all-projects"]).output().unwrap();
+    assert!(!out.status.success(), "tail -f --all-projects should error");
+}
+
+#[test]
+fn test_memory_dump_rejects_all_projects() {
+    let world = MockWorld::new();
+    let out = world.cmd().args(["memory", "dump", "--all-projects"]).output().unwrap();
+    assert!(!out.status.success(), "memory dump --all-projects should error");
+}
+
+#[test]
+fn test_memory_search_rejects_all_projects() {
+    let world = MockWorld::new();
+    let out = world.cmd().args(["memory", "search", "anything", "--all-projects"]).output().unwrap();
+    assert!(!out.status.success(), "memory search --all-projects should error");
+}
+
+/// `dump --session 0` and `dump 0` produce the same output.
+#[test]
+fn test_dump_session_flag_matches_positional() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-session-parity");
+    proj.session("only-sess")
+        .user_message("DUMP_PARITY_BODY")
+        .done();
+
+    let out_pos = world.cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output().unwrap();
+    let out_flag = world.cmd()
+        .args(["dump", "--session", "0", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out_pos.status.success(), "positional: {}", String::from_utf8_lossy(&out_pos.stderr));
+    assert!(out_flag.status.success(), "flag: {}", String::from_utf8_lossy(&out_flag.stderr));
+    assert_eq!(strip_ansi(stdout(&out_pos)), strip_ansi(stdout(&out_flag)));
+}
+
+#[test]
+fn test_dump_session_flag_with_non_default_positional_errors() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-session-conflict");
+    proj.session("sess-x").user_message("X").done();
+
+    // Both --session and a non-default positional are conflicting.
+    let out = world.cmd()
+        .args(["dump", "abcd", "--session", "ef", "--project", proj.path()])
+        .output().unwrap();
+    assert!(!out.status.success(), "should error when both forms supplied");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("--session") && err.contains("positional"),
+        "expected conflict message, got: {}", err);
+}
+
+#[test]
+fn test_tail_session_flag_matches_positional() {
+    let world = MockWorld::new();
+    let proj = world.project("tail-session-parity");
+    proj.session("only-sess").user_message("TAIL_PARITY_BODY").done();
+
+    let out_pos = world.cmd()
+        .args(["tail", "0", "--project", proj.path()])
+        .output().unwrap();
+    let out_flag = world.cmd()
+        .args(["tail", "--session", "0", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out_pos.status.success(), "positional: {}", String::from_utf8_lossy(&out_pos.stderr));
+    assert!(out_flag.status.success(), "flag: {}", String::from_utf8_lossy(&out_flag.stderr));
+    assert_eq!(strip_ansi(stdout(&out_pos)), strip_ansi(stdout(&out_flag)));
+}
+
+/// Subagent uniformity: the global --subagents flag toggles whether sessions/
+/// last/projects show subagent rows; default hides them.
+#[test]
+fn test_sessions_subagents_flag_toggles_visibility() {
+    let world = MockWorld::new();
+    let proj = world.project("sessions-subagents");
+    proj.session("parent").user_message("hello").done();
+    proj.subagent_session("parent", "agent01").user_message("subagent body").done();
+
+    let out_default = world.cmd().args(["sessions", "--project", proj.path()]).output().unwrap();
+    assert!(out_default.status.success());
+    let text_default = strip_ansi(stdout(&out_default));
+    assert!(!text_default.contains("[subagent]"),
+        "default should hide subagent rows: {}", text_default);
+
+    let out_sub = world.cmd().args(["sessions", "--subagents", "--project", proj.path()]).output().unwrap();
+    assert!(out_sub.status.success());
+    let text_sub = strip_ansi(stdout(&out_sub));
+    assert!(text_sub.contains("[subagent]"),
+        "--subagents should reveal subagent rows: {}", text_sub);
+}
+
+#[test]
+fn test_last_subagents_default_hidden() {
+    let world = MockWorld::new();
+    let proj = world.project("last-subagents-hide");
+    proj.session("parent").user_message("PARENT_LAST_BODY").done();
+    proj.subagent_session("parent", "agent01")
+        .user_message("SUBAGENT_LAST_BODY").done();
+
+    // Default: subagent records hidden.
+    let out_default = world.cmd().args(["last", "--project", proj.path()]).output().unwrap();
+    assert!(out_default.status.success());
+    let text_default = strip_ansi(stdout(&out_default));
+    assert!(text_default.contains("PARENT_LAST_BODY"));
+    assert!(!text_default.contains("SUBAGENT_LAST_BODY"),
+        "default last should hide subagent records: {}", text_default);
+
+    // With --subagents: subagent records appear.
+    let out_sub = world.cmd().args(["last", "--subagents", "--project", proj.path()]).output().unwrap();
+    assert!(out_sub.status.success());
+    let text_sub = strip_ansi(stdout(&out_sub));
+    assert!(text_sub.contains("SUBAGENT_LAST_BODY"),
+        "--subagents should include subagent records: {}", text_sub);
+}
+
+#[test]
+fn test_projects_sessions_subagents_flag() {
+    let world = MockWorld::new();
+    let proj = world.project("proj-sessions-sub");
+    proj.session("parent").user_message("hi").done();
+    proj.subagent_session("parent", "ag").user_message("sub").done();
+
+    // Without --subagents: subagent rows are hidden in the projects --sessions list.
+    let out_default = world.cmd().args(["projects", "--sessions"]).output().unwrap();
+    assert!(out_default.status.success());
+    let text_default = strip_ansi(stdout(&out_default));
+    assert!(!text_default.contains("[subagent]"),
+        "default projects --sessions should hide subagents: {}", text_default);
+
+    let out_sub = world.cmd().args(["projects", "--sessions", "--subagents"]).output().unwrap();
+    assert!(out_sub.status.success());
+    let text_sub = strip_ansi(stdout(&out_sub));
+    assert!(text_sub.contains("[subagent]"),
+        "--subagents should mark subagent rows: {}", text_sub);
+}
+
+/// `claugrep sessions --all-projects` should list sessions across every project
+/// with a per-project header.
+#[test]
+fn test_sessions_all_projects_lists_all() {
+    let world = MockWorld::new();
+    let pa = world.project("sess-all-a");
+    let pb = world.project("sess-all-b");
+    pa.session("aaa").user_message("a-content").done();
+    pb.session("bbb").user_message("b-content").done();
+
+    let out = world.cmd().args(["sessions", "--all-projects"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("aaa"), "expected session aaa in output: {}", text);
+    assert!(text.contains("bbb"), "expected session bbb in output: {}", text);
+    assert!(text.contains("sess-all-a"), "expected project header for sess-all-a: {}", text);
+    assert!(text.contains("sess-all-b"), "expected project header for sess-all-b: {}", text);
+}
+
+#[test]
+fn test_sessions_project_regexp_filters() {
+    let world = MockWorld::new();
+    let pa = world.project("sess-reg-only-a");
+    let pb = world.project("sess-reg-only-b");
+    pa.session("aaa").user_message("a").done();
+    pb.session("bbb").user_message("b").done();
+
+    let out = world.cmd().args(["sessions", "-P", "only-a"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("aaa"), "should include matching project: {}", text);
+    assert!(!text.contains("bbb"), "should exclude non-matching project: {}", text);
+}
+
+#[test]
+fn test_sessions_all_projects_json() {
+    let world = MockWorld::new();
+    let pa = world.project("sess-json-multi-a");
+    let pb = world.project("sess-json-multi-b");
+    pa.session("aaa").user_message("a").done();
+    pb.session("bbb").user_message("b").done();
+
+    let out = world.cmd().args(["sessions", "--all-projects", "--json"]).output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out)).expect("must be JSON");
+    let arr = parsed.as_array().expect("multi mode should return array");
+    let projects: Vec<&str> = arr.iter()
+        .map(|e| e["project"].as_str().unwrap_or(""))
+        .collect();
+    assert!(projects.iter().any(|p| p.contains("sess-json-multi-a")),
+        "expected project a in: {:?}", projects);
+    assert!(projects.iter().any(|p| p.contains("sess-json-multi-b")),
+        "expected project b in: {:?}", projects);
+}
+
+/// `last` defaults to current project (after the silent flip from cross-project).
+/// To get the old "all projects" behavior pass --all-projects.
+#[test]
+fn test_last_default_scopes_to_current_project_only() {
+    let world = MockWorld::new();
+    let pa = world.project("last-flip-a");
+    let pb = world.project("last-flip-b");
+    pa.session("aaa").user_message("FLIP_BODY_A").done();
+    pb.session("bbb").user_message("FLIP_BODY_B").done();
+
+    // --project pa: shows only A.
+    let out = world.cmd()
+        .args(["last", "--project", pa.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("FLIP_BODY_A"));
+    assert!(!text.contains("FLIP_BODY_B"),
+        "default-scoped last should not cross projects: {}", text);
+
+    // --all-projects: shows both.
+    let out_all = world.cmd().args(["last", "--all-projects"]).output().unwrap();
+    assert!(out_all.status.success(), "stderr: {}", String::from_utf8_lossy(&out_all.stderr));
+    let text_all = strip_ansi(stdout(&out_all));
+    assert!(text_all.contains("FLIP_BODY_A"));
+    assert!(text_all.contains("FLIP_BODY_B"));
+}
+
+/// `dump --max-line-width N` truncates long lines to N chars (with "...").
+#[test]
+fn test_dump_max_line_width_truncates() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-mlw");
+    let long = "x".repeat(300);
+    proj.session("dump-mlw-sess").user_message(&long).done();
+
+    let out = world.cmd()
+        .args(["dump", "--max-line-width", "50", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    // The long line should be truncated. The label adds "[user] " (7 chars) so the
+    // actual user-visible line will be longer than 50; what matters is the original
+    // body of 300 'x' chars must not appear in full.
+    let x_count = text.chars().filter(|&c| c == 'x').count();
+    assert!(x_count < 100, "expected x's truncated below 100 (got {}): {}", x_count, text);
+    assert!(text.contains("..."), "truncated output should contain '...': {}", text);
+}
+
+#[test]
+fn test_dump_max_line_width_zero_unlimited() {
+    let world = MockWorld::new();
+    let proj = world.project("dump-mlw-zero");
+    let long = "y".repeat(300);
+    proj.session("dump-mlw-zero-sess").user_message(&long).done();
+
+    let out = world.cmd()
+        .args(["dump", "--max-line-width", "0", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    let y_count = text.chars().filter(|&c| c == 'y').count();
+    assert_eq!(y_count, 300, "with --max-line-width 0 all 300 y's should be present");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// memory dump / search hermetic tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_memory_dump_finds_project_claude_md() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-basic");
+    fs::write(proj.join("CLAUDE.md"), "MEMORY_BASIC_CONTENT\n").unwrap();
+
+    let out = world.cmd()
+        .args(["memory", "dump", "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("MEMORY_BASIC_CONTENT"),
+        "expected CLAUDE.md content in dump: {}", text);
+}
+
+#[test]
+fn test_memory_dump_no_subdirs_excludes_deeper() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-no-subdirs");
+    fs::write(proj.join("CLAUDE.md"), "ROOT_CLAUDE\n").unwrap();
+    let sub = proj.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("CLAUDE.md"), "SUBDIR_CLAUDE\n").unwrap();
+
+    let out = world.cmd()
+        .args(["memory", "dump", "--no-subdirs", "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("ROOT_CLAUDE"));
+    assert!(!text.contains("SUBDIR_CLAUDE"),
+        "--no-subdirs should hide deeper CLAUDE.md: {}", text);
+}
+
+#[test]
+fn test_memory_dump_files_only_lists_paths() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-files-only");
+    fs::write(proj.join("CLAUDE.md"), "BODY_THAT_SHOULD_NOT_APPEAR\n").unwrap();
+
+    let out = world.cmd()
+        .args(["memory", "dump", "-l", "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("CLAUDE.md"), "should list path: {}", text);
+    assert!(!text.contains("BODY_THAT_SHOULD_NOT_APPEAR"),
+        "-l should not print contents: {}", text);
+}
+
+#[test]
+fn test_memory_search_finds_match() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-search-basic");
+    fs::write(proj.join("CLAUDE.md"),
+        "Some line\nFINDME_NEEDLE here\nAnother line\n").unwrap();
+
+    let out = world.cmd()
+        .args(["memory", "search", "FINDME_NEEDLE", "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("FINDME_NEEDLE"), "should find the needle: {}", text);
+}
+
+#[test]
+fn test_memory_search_list_alias_matches_files_with_matches() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-search-list");
+    fs::write(proj.join("CLAUDE.md"),
+        "this contains LISTNEEDLE inside\n").unwrap();
+
+    let out_alias = world.cmd()
+        .args(["memory", "search", "LISTNEEDLE", "--list",
+               "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    let out_full = world.cmd()
+        .args(["memory", "search", "LISTNEEDLE", "--files-with-matches",
+               "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+
+    assert!(out_alias.status.success(), "alias: {}", String::from_utf8_lossy(&out_alias.stderr));
+    assert!(out_full.status.success(), "full: {}", String::from_utf8_lossy(&out_full.stderr));
+    assert_eq!(strip_ansi(stdout(&out_alias)), strip_ansi(stdout(&out_full)));
+}
+
+#[test]
+fn test_search_list_alias_matches_sessions_with_matches() {
+    let world = MockWorld::new();
+    let proj = world.project("search-list-alias");
+    proj.session("sess-x").user_message("LIST_ALIAS_NEEDLE").done();
+
+    let out_alias = world.cmd()
+        .args(["search", "LIST_ALIAS_NEEDLE", "--list", "--project", proj.path()])
+        .output().unwrap();
+    let out_full = world.cmd()
+        .args(["search", "LIST_ALIAS_NEEDLE", "--sessions-with-matches",
+               "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out_alias.status.success(), "alias: {}", String::from_utf8_lossy(&out_alias.stderr));
+    assert!(out_full.status.success(), "full: {}", String::from_utf8_lossy(&out_full.stderr));
+    assert_eq!(strip_ansi(stdout(&out_alias)), strip_ansi(stdout(&out_full)));
+}
+
+#[test]
+fn test_memory_search_max_results_caps() {
+    let world = MockWorld::new();
+    let proj = world.real_project("mem-search-cap");
+    fs::write(proj.join("CLAUDE.md"), "CAPNEEDLE root\n").unwrap();
+    let sub = proj.join("sub");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(sub.join("CLAUDE.md"), "CAPNEEDLE sub\n").unwrap();
+
+    // Without cap: both files should appear.
+    let out_full = world.cmd()
+        .args(["memory", "search", "CAPNEEDLE", "-l",
+               "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out_full.status.success());
+    let lines_full = strip_ansi(stdout(&out_full)).lines().count();
+    assert!(lines_full >= 2, "expected at least 2 matched files: {}", lines_full);
+
+    // With --max-results 1: only one file path appears.
+    let out_cap = world.cmd()
+        .args(["memory", "search", "CAPNEEDLE", "-l", "--max-results", "1",
+               "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out_cap.status.success());
+    let lines_cap = strip_ansi(stdout(&out_cap)).lines().count();
+    assert_eq!(lines_cap, 1, "with --max-results 1 only 1 file should print");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// global flag placement: globals must work both before and after the
+// subcommand name (clap's `global = true` semantics).
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_global_project_flag_after_subcommand() {
+    let world = MockWorld::new();
+    let proj = world.project("flag-after");
+    proj.session("a").user_message("FLAG_AFTER_BODY").done();
+
+    let out = world.cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn test_global_project_flag_before_subcommand() {
+    let world = MockWorld::new();
+    let proj = world.project("flag-before");
+    proj.session("a").user_message("FLAG_BEFORE_BODY").done();
+
+    let out = world.cmd()
+        .args(["--project", proj.path(), "sessions"])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+#[test]
+fn test_global_json_flag_on_sessions() {
+    let world = MockWorld::new();
+    let proj = world.project("global-json");
+    proj.session("a").user_message("body").done();
+
+    let out = world.cmd()
+        .args(["--json", "sessions", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out)).expect("must be JSON");
+    assert!(parsed.is_array(), "global --json should still produce array on sessions");
 }

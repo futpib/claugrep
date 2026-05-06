@@ -36,9 +36,19 @@ Commands:
   tail      Show the last N records of a session (like tail)
 ```
 
+### Behavior changes (recent)
+
+- `claugrep last` now defaults to the **current project** (was: all projects). Pass `--all-projects` to restore the cross-project activity feed.
+- `claugrep last` now hides subagent records by default (was: showed them). Pass `--subagents` to include them.
+- `claugrep dump` now respects `--max-line-width`.
+- `claugrep dump` and `claugrep tail` accept `--session <id>` as a flag in addition to the positional `<SESSION>` argument.
+- `claugrep sessions`, `claugrep last`, `claugrep projects` accept `--all-projects` and `-P/--project-regexp` for cross-project listings.
+- `claugrep dump`, `claugrep tail`, and `claugrep memory dump|search` reject `--all-projects`/`-P` at runtime (single-project commands).
+- `-l/--list` is now the canonical long form on `claugrep search` and `claugrep memory search` (with `--sessions-with-matches`/`--files-with-matches` kept as aliases).
+
 ### Global options
 
-These options are accepted by all commands:
+These options are accepted by every subcommand. Subcommands ignore options they don't use.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -47,25 +57,28 @@ These options are accepted by all commands:
 | `--color <when>` | `auto` | Colorize output: `auto`, `always`, or `never` (also respects `NO_COLOR`) |
 | `--after <date>` / `--since <date>` | | Only show sessions modified after the given date |
 | `--before <date>` / `--until <date>` | | Only show sessions modified before the given date |
+| `--project <path>` | `.` | Project directory |
+| `--all-projects` | | List/search across every known project (rejected by `dump`, `tail`, `memory`) |
+| `-P, --project-regexp <REGEXP>` | | Filter to projects matching REGEXP, can be repeated (rejected by `dump`, `tail`, `memory`) |
+| `--session <id>` | | Session UUID prefix, numeric offset, or `all` (used by `search`/`dump`/`tail`) |
+| `-t, --targets <types>` | `default` | Comma-separated content types (see table below), `default`, or `all` |
+| `--no-diff` | | Show raw key/value format for Edit tool records instead of unified diff |
+| `--max-line-width <n>` | 200 | Truncate long lines to this width (0 = unlimited) |
+| `--max-results <n>` | 50 | Maximum number of results (search / memory search) |
+| `--subagents` | | Include subagent transcripts (sessions/last/projects/dump/tail) |
+| `--json` | | Output as JSON |
 
 Date values are git-compatible: `yesterday`, `'2 days ago'`, `2026-03-24`, `Monday`, `'last week'`, etc.
 
-Most commands accept `--project <path>` to select which project's sessions to use (default: current directory). The project path is resolved to a canonical absolute path and matched against the directory names in `~/.claude/projects/`.
+The project path is resolved to a canonical absolute path and matched against the directory names in `~/.claude/projects/` and every claudex account.
 
-### `claugrep search`
-
-```
-claugrep search [OPTIONS] <PATTERN>
-```
-
-Searches transcript content for `PATTERN`. By default the pattern is tried first as a regular expression and, if it is invalid regex, falls back to a literal string match.
-
-**Content type filter** (default: standard types):
+**Content types** for `-t/--targets`:
 
 | Value | Searches |
 |-------|----------|
 | `user` | User messages |
 | `assistant` | Assistant text responses |
+| `thinking` | Assistant thinking blocks |
 | `bash-command` | Bash commands sent by the assistant |
 | `bash-output` | Bash command output / tool results from Bash |
 | `tool-use` | Tool use inputs (any tool) |
@@ -76,15 +89,20 @@ Searches transcript content for `PATTERN`. By default the pattern is tried first
 | `system` | System messages (internal) |
 | `file-history-snapshot` | File history snapshots (internal) |
 
-Pass one or more types as a comma-separated value to `-t/--targets`, e.g. `--targets user,assistant`. Use the special keyword `default` (the default) for all standard types, or `all` to include internal types as well.
+Use `TYPE.SUBTYPE` for narrower filters (e.g. `system.away_summary`, `tool-use.Edit`). The keyword `default` selects standard types; `all` includes internal types.
 
-**Options:**
+### `claugrep search`
+
+```
+claugrep search [OPTIONS] <PATTERN>
+```
+
+Searches transcript content for `PATTERN`. By default the pattern is tried first as a regular expression and, if it is invalid regex, falls back to a literal string match. Accepts the global options listed above.
+
+**Search-specific options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-t, --targets <types>` | `default` | Comma-separated content types (see table above), `default`, or `all` |
-| `--project <path>` | `.` | Project directory |
-| `--session <id>` | all | Session UUID prefix, numeric offset, or `all` |
 | `-C, --context <n>` | 0 | Context lines around each match |
 | `-B, --before-context <n>` | 0 | Context lines before each match |
 | `-A, --after-context <n>` | 0 | Context lines after each match |
@@ -93,16 +111,10 @@ Pass one or more types as a comma-separated value to `-t/--targets`, e.g. `--tar
 | `--after-records <n>` | | Record-level context: N records immediately after the match |
 | `--records <spec>` | | Record-level context spec: signed offsets & ranges (see below) |
 | `--records-type <types>` | | Count and display record context only over these types |
-| `--max-results <n>` | 50 | Maximum number of matches to return |
-| `--max-line-width <n>` | 200 | Truncate long lines to this width (0 = unlimited) |
 | `-i, --ignore-case` | | Case-insensitive search |
 | `-F, --fixed-strings` | | Treat pattern as a fixed string (no regex interpretation) |
 | `-E, --extended-regexp` | | Treat pattern as an extended regular expression (no literal fallback) |
-| `-l, --sessions-with-matches` | | Print only session file paths that contain matches (exits 1 if none) |
-| `--no-diff` | | For Edit tool matches, show raw key/value format instead of unified diff |
-| `--json` | | Output matches as JSON |
-| `--all-projects` | | Search all projects under `~/.claude/projects/` (ignores `--project`) |
-| `-P, --project-regexp <REGEXP>` | | Search only projects whose path matches REGEXP; can be repeated (ignores `--project`) |
+| `-l, --list` | | Print only session file paths that contain matches (exits 1 if none); alias `--sessions-with-matches` |
 
 **Edit tool diffs:** When a `tool-use` match is an Edit tool call, the result is rendered as a unified diff by default (old lines prefixed `-`, new lines `+`). Pass `--no-diff` to see the raw `file_path` / `old_string` / `new_string` key-value format instead.
 
@@ -127,77 +139,84 @@ When `--json` is combined with any record-context flag, each match is wrapped as
 ### `claugrep sessions`
 
 ```
-claugrep sessions [--project <path>] [--json]
+claugrep sessions [GLOBAL OPTIONS]
 ```
 
-Lists all sessions for a project, newest first. Subagent sessions are omitted from the default output but included in JSON output (`isSubagent: true`).
+Lists sessions for a project (or every project, with `--all-projects` / `-P`), newest first. Subagent sessions are hidden by default; pass `--subagents` to include them. With `--all-projects`/`-P`, output is grouped by project (per-project header in plain text, `[{project, sessions[]}, ...]` in JSON).
 
 ### `claugrep projects`
 
 ```
-claugrep projects [--sessions] [--json]
+claugrep projects [-s|--sessions]
 ```
 
-Lists all known projects under `~/.claude/projects/`, showing session count and latest modification time.
+Lists all known projects under `~/.claude/projects/` and every claudex account, showing session count and latest modification time.
 
 | Flag | Description |
 |------|-------------|
 | `-s, --sessions` | Also list sessions nested under each project (indented in plain text; `sessions` array in JSON) |
-| `--json` | Output as JSON |
 
-When multiple accounts are configured via claudex, projects are annotated with their account name.
+When multiple accounts are configured via claudex, projects are annotated with their account name. Pass `--subagents` to include subagent rows in the `--sessions` listing.
 
 ### `claugrep last`
 
 ```
-claugrep last [OPTIONS]
+claugrep last [-n N] [GLOBAL OPTIONS]
 ```
 
-Shows the last N content records across all sessions (or all sessions of a given project), sorted by timestamp. Useful for a quick cross-project activity feed.
+Shows the last N content records, sorted by timestamp. Defaults to the current project; pass `--all-projects` for the cross-project activity feed (the previous default).
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-n, --last <n>` | 20 | Number of records to show |
-| `--project <path>` | all projects | Restrict to a specific project |
-| `-t, --targets <types>` | `default` | Comma-separated content types, `default`, or `all` |
-| `--max-line-width <n>` | 200 | Truncate long lines (0 = unlimited) |
-| `--no-diff` | | Show raw key/value format for Edit tool records |
-| `--json` | | Output raw JSONL records |
 
 ### `claugrep dump`
 
 ```
-claugrep dump [OPTIONS] [SESSION]
+claugrep dump [GLOBAL OPTIONS] [SESSION]
 ```
 
-Dumps the content of a session as plain text. `SESSION` is a UUID prefix, numeric offset (e.g. `-1` for the previous session, `0` for the latest), or `all` (default: `0`).
+Dumps the content of a session as plain text. `SESSION` is a UUID prefix, numeric offset (e.g. `-1` for the previous session, `0` for the latest), or `all` (default: `0`). The same selector can be passed as `--session <id>` instead of the positional argument; mixing both forms with non-default values is an error.
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--project <path>` | `.` | Project directory |
-| `-t, --targets <types>` | `default` | Comma-separated content types, `default`, or `all` |
-| `--no-diff` | | Show raw key/value format for Edit tool records |
-| `--json` | | Output raw JSONL records |
-
-Valid target types: `user`, `assistant`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `subagent-prompt`, `compact-summary`, `queue-operation`, `system`, `file-history-snapshot`, `last-prompt`.
+`--all-projects` and `-P` are not accepted (single-session command).
 
 ### `claugrep tail`
 
 ```
-claugrep tail [OPTIONS] [SESSION]
+claugrep tail [-n N] [-f] [GLOBAL OPTIONS] [SESSION]
 ```
 
-Shows the last N content records of a session, sorted by timestamp. Optionally follows the session file for new records as they arrive (like `tail -f`). `SESSION` defaults to `0` (the latest session).
+Shows the last N content records of a session, sorted by timestamp. Optionally follows the session file for new records as they arrive (like `tail -f`). `SESSION` defaults to `0` (the latest session) and may also be supplied via `--session`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-n, --lines <n>` | 10 | Number of records to show |
 | `-f, --follow` | | Follow the session file for new records (polls every 200 ms) |
-| `--project <path>` | `.` | Project directory |
-| `-t, --targets <types>` | `default` | Comma-separated content types, `default`, or `all` |
-| `--max-line-width <n>` | 200 | Truncate long lines (0 = unlimited) |
-| `--no-diff` | | Show raw key/value format for Edit tool records |
-| `--json` | | Output raw JSONL records |
+
+`--all-projects` and `-P` are not accepted (single-session command); this also blocks `tail -f --all-projects` transitively.
+
+### `claugrep memory dump`
+
+```
+claugrep memory dump [--no-subdirs] [-l|--files-only] [GLOBAL OPTIONS]
+```
+
+Prints every markdown memory file (`CLAUDE.md`, auto-memory) that applies to the project. Single-project only — `--all-projects`/`-P` are rejected.
+
+### `claugrep memory search`
+
+```
+claugrep memory search [OPTIONS] <PATTERN>
+```
+
+Searches markdown memory files for `PATTERN`. Single-project only — `--all-projects`/`-P` are rejected.
+
+| Flag | Description |
+|------|-------------|
+| `-C/-B/-A` | Line-level context flags (same semantics as `search`) |
+| `-i/-F/-E` | Case-insensitive / fixed-string / extended regex |
+| `--no-subdirs` | Exclude on-demand `CLAUDE.md` files in subdirectories |
+| `-l, --list` | Print only file paths with matches (alias `--files-with-matches`) |
 
 ## Examples
 
@@ -263,8 +282,14 @@ claugrep projects
 # List all projects with their sessions
 claugrep projects --sessions
 
-# Show recent activity across all projects
+# Show recent activity in the current project
 claugrep last -n 10
+
+# Show recent activity across all projects
+claugrep last -n 10 --all-projects
+
+# List sessions across every project (grouped by project)
+claugrep sessions --all-projects
 
 # Dump the latest session (user + assistant messages)
 claugrep dump 0 --project ~/code/my-project
