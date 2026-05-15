@@ -1187,6 +1187,23 @@ fn test_search_default_plus_bare_system_disables_subtype_filter() {
 }
 
 #[test]
+fn test_search_targets_unknown_type_is_fatal() {
+    // A completely unknown TYPE (typo) should exit nonzero with an error,
+    // not silently warn-and-fall-back.
+    let world = MockWorld::new();
+    let proj = world.project("targets-unknown");
+    proj.session("sess-tu").user_message("BODY_TU").done();
+
+    let out = world.cmd()
+        .args(["search", "BODY_TU", "-t", "tool-uses", "--project", proj.path()])
+        .output().unwrap();
+    assert!(!out.status.success(), "unknown -t TYPE should not succeed");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("error:") && err.contains("tool-uses"),
+        "stderr should report unknown target type, got: {}", err);
+}
+
+#[test]
 fn test_search_targets_subtype_on_typeless_target_warns_keeps_bare() {
     let world = MockWorld::new();
     let proj = world.project("subtype-typeless");
@@ -1392,11 +1409,81 @@ fn test_summary_no_limit_hint_when_fewer_results_than_max() {
 }
 
 #[test]
+fn test_max_results_warns_on_irrelevant_subcommand() {
+    // last/tail/dump/projects/sessions do not honor --max-results;
+    // setting it should produce a warning so the user knows.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-warn");
+    proj.session("sess-mrw").user_message("BODY_MRW").done();
+
+    for subcmd in ["last", "sessions", "projects", "dump", "tail"] {
+        let mut args: Vec<&str> = vec![subcmd, "--max-results", "5", "--project", proj.path()];
+        // dump/tail accept a positional session arg with a sensible default; nothing else is required.
+        if subcmd == "projects" {
+            // `projects` ignores --project; that's fine, the flag is still recognized.
+            args = vec![subcmd, "--max-results", "5"];
+        }
+        let out = world.cmd().args(&args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("--max-results has no effect"),
+            "subcommand '{}' should warn that --max-results is ignored, got stderr: {}",
+            subcmd, err
+        );
+    }
+}
+
+#[test]
+fn test_max_results_no_warning_when_not_set() {
+    // Sanity: no warning when --max-results is not passed.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-no-warn");
+    proj.session("sess-mrnw").user_message("BODY_MRNW").done();
+
+    let out = world.cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output().unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !err.contains("--max-results has no effect"),
+        "no warning expected when --max-results is not set, got: {}", err
+    );
+}
+
+#[test]
+fn test_search_max_results_zero_is_unlimited() {
+    // With more matches than the default cap (50), --max-results 0 should
+    // return all of them and suppress the limit hint.
+    let world = MockWorld::new();
+    let proj = world.project("max-results-unlimited");
+    let mut s = proj.session("sess-mru");
+    for i in 0..120 {
+        s = s.user_message(&format!("UNLIMITED_MATCH_{}", i));
+    }
+    s.done();
+
+    let out = world.cmd()
+        .args(["search", "UNLIMITED_MATCH", "--max-results", "0", "--project", proj.path()])
+        .output().unwrap();
+
+    assert!(out.status.success());
+    let out_text = strip_ansi(stdout(&out));
+    let hits = out_text.matches("UNLIMITED_MATCH_").count();
+    assert!(hits >= 120, "expected >=120 matches with --max-results 0, got {}", hits);
+
+    let err = strip_ansi(stderr(&out));
+    assert!(
+        !err.contains("Result limit reached"),
+        "stderr should NOT show the limit hint with --max-results 0, got: {}",
+        err
+    );
+}
+
+#[test]
 fn test_summary_no_limit_hint_when_exact_match_count_equals_max() {
-    // Exactly 3 messages, limit is also 3 — this is the coincidence case.
-    // We cannot distinguish it from a real limit hit without look-ahead,
-    // so we accept either behavior here; this test just documents the case.
-    // The important thing is tested by test_summary_no_limit_hint_when_fewer_results_than_max.
+    // Exactly 3 messages, limit is also 3 — the search finishes naturally
+    // without breaking at the cap, so the hint should NOT fire.
     let world = MockWorld::new();
     let proj = world.project("max-results-exact");
     proj.session("sess-mre")
@@ -1410,9 +1497,12 @@ fn test_summary_no_limit_hint_when_exact_match_count_equals_max() {
         .output().unwrap();
 
     assert!(out.status.success());
-    // No assertion about --max-results presence — behavior is intentionally unspecified
-    // when count == limit (we can't know without extra work whether more exist).
-    let _ = strip_ansi(stdout(&out));
+    let err = strip_ansi(stderr(&out));
+    assert!(
+        !err.contains("Result limit reached"),
+        "stderr should NOT show the limit hint when count == max and no more matches exist, got: {}",
+        err
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -5130,6 +5220,16 @@ fn test_memory_search_max_results_caps() {
     assert!(out_cap.status.success());
     let lines_cap = strip_ansi(stdout(&out_cap)).lines().count();
     assert_eq!(lines_cap, 1, "with --max-results 1 only 1 file should print");
+
+    // With --max-results 0: unlimited — should match the uncapped run.
+    let out_zero = world.cmd()
+        .args(["memory", "search", "CAPNEEDLE", "-l", "--max-results", "0",
+               "--project", proj.to_str().unwrap()])
+        .output().unwrap();
+    assert!(out_zero.status.success());
+    let lines_zero = strip_ansi(stdout(&out_zero)).lines().count();
+    assert_eq!(lines_zero, lines_full,
+        "--max-results 0 should be unlimited (got {}, uncapped {})", lines_zero, lines_full);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

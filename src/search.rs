@@ -193,15 +193,20 @@ fn make_context_record(r: &ExtractedContent, offset: i32, keep_raw: bool) -> Con
 }
 
 /// Search sessions, calling `on_match` for each result as it is found.
-/// Returns the total number of matches.
-pub fn search_sessions<F>(sessions: &[SessionFile], options: &SearchOptions, mut on_match: F) -> usize
+/// Returns `(count, hit_cap)` — `hit_cap` is true if the search stopped early
+/// because `max_results` was reached (i.e. more matches may exist), false if it
+/// finished naturally. Callers use this to decide whether to print the
+/// "limit reached" hint.
+pub fn search_sessions<F>(sessions: &[SessionFile], options: &SearchOptions, mut on_match: F) -> (usize, bool)
 where
     F: FnMut(SearchMatch),
 {
     let mut match_number = 0;
+    let mut hit_cap = false;
 
     for session in sessions {
         if match_number >= options.max_results {
+            hit_cap = true;
             break;
         }
 
@@ -215,6 +220,7 @@ where
 
         for (i, content) in contents.iter().enumerate() {
             if match_number >= options.max_results {
+                hit_cap = true;
                 break;
             }
 
@@ -252,7 +258,7 @@ where
         }
     }
 
-    match_number
+    (match_number, hit_cap)
 }
 
 #[cfg(test)]

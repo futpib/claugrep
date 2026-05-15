@@ -80,9 +80,9 @@ struct Cli {
     #[arg(long = "max-line-width", global = true, default_value = "200")]
     max_line_width: usize,
 
-    /// Max results
-    #[arg(long = "max-results", global = true, default_value = "50")]
-    max_results: usize,
+    /// Max results for `search`/`memory search` (default: 50; 0 = unlimited; ignored by other subcommands)
+    #[arg(long = "max-results", global = true)]
+    max_results: Option<usize>,
 
     /// Include subagent transcripts (where applicable)
     #[arg(long, global = true)]
@@ -382,7 +382,14 @@ queue-operation, last-prompt, agent-name, custom-title, ai-title, permission-mod
 attachment, progress, pull-request.\n\n\
 Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
 
-fn parse_targets(s: &str) -> TargetSelector {
+fn parse_targets_or_exit(s: &str) -> TargetSelector {
+    parse_targets(s).unwrap_or_else(|e| {
+        eprintln!("error: {}", e);
+        std::process::exit(2);
+    })
+}
+
+fn parse_targets(s: &str) -> Result<TargetSelector, String> {
     let mut items: Vec<QualifiedTarget> = vec![];
     for tok in s.split(',') {
         let tok = tok.trim();
@@ -412,10 +419,14 @@ fn parse_targets(s: &str) -> TargetSelector {
         match tok.parse::<QualifiedTarget>() {
             Ok(q) => items.push(q),
             Err(msg) => {
+                // If the bare TYPE itself is unknown, this is a user typo — fatal.
+                // If TYPE is valid but the subtype isn't supported, keep the bare TYPE
+                // and just warn (preserves prior behaviour for e.g. `user.foo`).
+                let bare_name = tok.split_once('.').map(|(n, _)| n).unwrap_or(tok);
+                if bare_name.parse::<Target>().is_err() {
+                    return Err(format!("unknown target type '{}': {}", bare_name, msg));
+                }
                 eprintln!("warning: {}", msg);
-                // If the qualifier was the only problem, keep the bare target
-                // so the user still gets *something* matching the type they
-                // typed (consistent with prior behaviour).
                 if let Some((name, _)) = tok.split_once('.') {
                     if let Ok(t) = name.parse::<Target>() {
                         items.push(QualifiedTarget::bare(t));
@@ -424,7 +435,7 @@ fn parse_targets(s: &str) -> TargetSelector {
             }
         }
     }
-    items.into_iter().collect()
+    Ok(items.into_iter().collect())
 }
 
 fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
@@ -679,6 +690,30 @@ fn validate_multi_project_unsupported(
 /// (one raw entry per line). With `wrap_context = true` each match is wrapped
 /// in `{"match": raw, "context": [{"offset": n, "entry": raw}, ...]}` so the
 /// neighboring records the user asked for can be grouped with their match.
+/// Default cap used by `search` and `memory search` when the user does not pass
+/// `--max-results`. Kept in code rather than in clap's `default_value` so we can
+/// distinguish "user didn't set it" from "user explicitly chose this number".
+const DEFAULT_MAX_RESULTS: usize = 50;
+
+/// Resolve `--max-results` for subcommands that consume it.
+/// `None` → use the default cap; `Some(0)` → unlimited (represented as `usize::MAX`
+/// so existing cap arithmetic Just Works); `Some(n>0)` → n.
+fn resolve_max_results(opt: Option<usize>) -> usize {
+    match opt {
+        None => DEFAULT_MAX_RESULTS,
+        Some(0) => usize::MAX,
+        Some(n) => n,
+    }
+}
+
+/// Warn (once) when `--max-results` is set on a subcommand that doesn't use it,
+/// so the flag's footprint matches its advertised effect.
+fn warn_max_results_ignored(opt: Option<usize>, cmd_name: &str) {
+    if opt.is_some() {
+        eprintln!("warning: --max-results has no effect on the '{}' subcommand", cmd_name);
+    }
+}
+
 fn emit_json_match(m: &crate::search::SearchMatch, wrap_context: bool) {
     if wrap_context {
         let ctx: Vec<serde_json::Value> = m.context_records.iter().map(|c| json!({
@@ -760,7 +795,7 @@ fn main() {
             Ok(dt) => Some(dt),
             Err(e) => {
                 eprintln!("error: {}", e);
-                std::process::exit(1);
+                std::process::exit(2);
             }
         },
     };
@@ -771,7 +806,7 @@ fn main() {
             Ok(dt) => Some(dt),
             Err(e) => {
                 eprintln!("error: {}", e);
-                std::process::exit(1);
+                std::process::exit(2);
             }
         },
     };
@@ -786,7 +821,7 @@ fn main() {
         targets: targets_str,
         no_diff,
         max_line_width,
-        max_results,
+        max_results: max_results_opt,
         subagents,
         json,
     } = cli;
@@ -798,7 +833,8 @@ fn main() {
             sessions_with_matches, ignore_case,
             fixed_strings, extended_regexp,
         } => {
-            let targets = parse_targets(&targets_str);
+            let max_results = resolve_max_results(max_results_opt);
+            let targets = parse_targets_or_exit(&targets_str);
 
             let context_offsets = match merge_record_context(
                 around_records, before_records, after_records, records.as_deref(),
@@ -811,7 +847,7 @@ fn main() {
             };
             let context_type_filter: Option<TargetSelector> = records_type
                 .as_deref()
-                .map(parse_targets);
+                .map(parse_targets_or_exit);
 
             // When record-context is requested, extract all known types so offsets
             // can walk over any record; otherwise just the -t targets are enough.
@@ -837,10 +873,12 @@ fn main() {
                 // Default: try as regex, fall back to literal
                 let literal_pat = Regex::new(&format!("{}{}", flags, escaped))
                     .expect("invalid pattern");
-                if let Ok(regex_pat) = Regex::new(&format!("{}{}", flags, pattern)) {
-                    vec![regex_pat]
-                } else {
-                    vec![literal_pat]
+                match Regex::new(&format!("{}{}", flags, pattern)) {
+                    Ok(regex_pat) => vec![regex_pat],
+                    Err(e) => {
+                        eprintln!("warning: pattern '{}' is not a valid regex ({}); falling back to literal search. Use -F to silence, or -E to make this an error.", pattern, e);
+                        vec![literal_pat]
+                    }
                 }
             };
 
@@ -900,6 +938,7 @@ fn main() {
             let mut projects_with_results = 0usize;
             let mut first_project_output = true;
             let mut remaining = max_results;
+            let mut any_hit_cap = false;
             let total_projects_searched = match &scope {
                 ProjectScope::Single(_) => 1,
                 ProjectScope::Multi(p) => p.len(),
@@ -914,13 +953,14 @@ fn main() {
                         Ok(s) => s,
                         Err(e) => {
                             if is_multi { continue; }
-                            eprintln!("{}", e);
-                            std::process::exit(1);
+                            eprintln!("error: {}", e);
+                            std::process::exit(2);
                         }
                     };
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
                     let wrap_context = !proj_options.context_offsets.is_empty();
-                    let count = search_sessions(&resolved, &proj_options, |m| {
+                    // JSON output suppresses human hints, so hit_cap is unused here.
+                    let (count, _hit_cap) = search_sessions(&resolved, &proj_options, |m| {
                         emit_json_match(&m, wrap_context);
                     });
                     remaining = remaining.saturating_sub(count);
@@ -933,12 +973,13 @@ fn main() {
                         Ok(s) => s,
                         Err(e) => {
                             if is_multi { continue; }
-                            eprintln!("{}", e);
-                            std::process::exit(1);
+                            eprintln!("error: {}", e);
+                            std::process::exit(2);
                         }
                     };
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
-                    let count = search_sessions(&resolved, &proj_options, |m| {
+                    // -l mode prints only paths; hit_cap goes unused for now.
+                    let (count, _hit_cap) = search_sessions(&resolved, &proj_options, |m| {
                         let path = resolved.iter()
                             .find(|s| s.session_id == m.session_id)
                             .map(|s| s.file_path.to_string_lossy().to_string())
@@ -959,8 +1000,8 @@ fn main() {
                         Ok(s) => s,
                         Err(e) => {
                             if is_multi { continue; }
-                            eprintln!("{}", e);
-                            std::process::exit(1);
+                            eprintln!("error: {}", e);
+                            std::process::exit(2);
                         }
                     };
                     total_sessions_searched += resolved.len();
@@ -970,7 +1011,7 @@ fn main() {
                     let mut project_lines: Vec<String> = vec![];
                     let mut first_in_proj = true;
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
-                    let count = search_sessions(&resolved, &proj_options, |m| {
+                    let (count, hit_cap) = search_sessions(&resolved, &proj_options, |m| {
                         if !first_in_proj { project_lines.push(String::new()); }
                         first_in_proj = false;
                         let rendered = if !no_diff && m.edit_diff.is_some() {
@@ -980,6 +1021,7 @@ fn main() {
                         };
                         project_lines.push(rendered);
                     });
+                    if hit_cap { any_hit_cap = true; }
 
                     if count > 0 {
                         let mut out = stdout.lock();
@@ -1008,8 +1050,8 @@ fn main() {
                     };
                     println!("{}", format_summary(total_matches, project_path, total_sessions_searched));
                 }
-                if total_matches == max_results {
-                    eprintln!("Hint: Result limit reached. Use --max-results to increase the limit.");
+                if any_hit_cap {
+                    eprintln!("Hint: Result limit reached. Use --max-results <n> to raise it, or --max-results 0 for unlimited.");
                 }
                 if get_did_truncate() {
                     eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
@@ -1018,7 +1060,8 @@ fn main() {
         }
 
         Commands::Last { count } => {
-            let target_set = parse_targets(&targets_str);
+            warn_max_results_ignored(max_results_opt, "last");
+            let target_set = parse_targets_or_exit(&targets_str);
 
             let scope = match select_project_scope(&project, all_projects, &project_regexp, &config_dirs) {
                 Ok(s) => s,
@@ -1084,6 +1127,7 @@ fn main() {
         }
 
         Commands::Sessions {} => {
+            warn_max_results_ignored(max_results_opt, "sessions");
             let scope = match select_project_scope(&project, all_projects, &project_regexp, &config_dirs) {
                 Ok(s) => s,
                 Err(e) => {
@@ -1160,6 +1204,7 @@ fn main() {
         }
 
         Commands::Projects { sessions: list_sessions } => {
+            warn_max_results_ignored(max_results_opt, "projects");
             let projects = discover_projects(&config_dirs);
 
             if projects.is_empty() {
@@ -1259,6 +1304,7 @@ fn main() {
         }
 
         Commands::Dump { session_pos } => {
+            warn_max_results_ignored(max_results_opt, "dump");
             if let Err(e) = validate_multi_project_unsupported("dump", all_projects, &project_regexp) {
                 eprintln!("error: {}", e);
                 std::process::exit(2);
@@ -1271,7 +1317,7 @@ fn main() {
                 }
             };
             let project_path = resolve_project(&project);
-            let target_set = parse_targets(&targets_str);
+            let target_set = parse_targets_or_exit(&targets_str);
 
             let all_sessions = filter_sessions_before(
                 filter_sessions_since(
@@ -1283,8 +1329,8 @@ fn main() {
             let sessions = match resolve_session(Some(&session), &all_sessions) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
+                    eprintln!("error: {}", e);
+                    std::process::exit(2);
                 }
             };
 
@@ -1316,6 +1362,7 @@ fn main() {
         }
 
         Commands::Tail { count, follow, session_pos } => {
+            warn_max_results_ignored(max_results_opt, "tail");
             if let Err(e) = validate_multi_project_unsupported("tail", all_projects, &project_regexp) {
                 eprintln!("error: {}", e);
                 std::process::exit(2);
@@ -1328,7 +1375,7 @@ fn main() {
                 }
             };
             let project_path = resolve_project(&project);
-            let target_set = parse_targets(&targets_str);
+            let target_set = parse_targets_or_exit(&targets_str);
 
             let all_sessions = filter_sessions_before(
                 filter_sessions_since(
@@ -1340,8 +1387,8 @@ fn main() {
             let sessions = match resolve_session(Some(&session), &all_sessions) {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("{}", e);
-                    std::process::exit(1);
+                    eprintln!("error: {}", e);
+                    std::process::exit(2);
                 }
             };
 
@@ -1379,12 +1426,16 @@ fn main() {
             if follow {
                 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
+                if subagents {
+                    eprintln!("warning: --subagents has no effect with -f; only the main session file is followed");
+                }
+
                 // Follow only the main (non-subagent) session file
                 let main_session = match sessions.iter().find(|s| !s.is_subagent) {
                     Some(s) => s,
                     None => {
-                        eprintln!("No main session file to follow");
-                        std::process::exit(1);
+                        eprintln!("error: No main session file to follow");
+                        std::process::exit(2);
                     }
                 };
 
@@ -1392,7 +1443,7 @@ fn main() {
                     Ok(f) => f,
                     Err(e) => {
                         eprintln!("error: failed to open {}: {}", main_session.file_path.display(), e);
-                        std::process::exit(1);
+                        std::process::exit(2);
                     }
                 };
 
@@ -1461,6 +1512,14 @@ fn main() {
                 eprintln!("error: {}", e);
                 std::process::exit(2);
             }
+            // `memory search` honors --max-results; `memory dump` does not.
+            let max_results = match &subcommand {
+                MemoryCommands::Search { .. } => resolve_max_results(max_results_opt),
+                MemoryCommands::Dump { .. } => {
+                    warn_max_results_ignored(max_results_opt, "memory dump");
+                    DEFAULT_MAX_RESULTS
+                }
+            };
             let paths: Vec<&Path> = config_dirs.iter().map(|(_, d)| d.as_path()).collect();
             let memory_args = MemoryArgs {
                 project: &project,
@@ -1555,7 +1614,10 @@ fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path], args: &MemoryArgs) {
                 let literal = Regex::new(&format!("{}{}", flags, escaped)).expect("invalid pattern");
                 match Regex::new(&format!("{}{}", flags, pattern)) {
                     Ok(r) => vec![r],
-                    Err(_) => vec![literal],
+                    Err(e) => {
+                        eprintln!("warning: pattern '{}' is not a valid regex ({}); falling back to literal search. Use -F to silence, or -E to make this an error.", pattern, e);
+                        vec![literal]
+                    }
                 }
             };
 
@@ -1564,12 +1626,13 @@ fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path], args: &MemoryArgs) {
             let ctx_after = after_context.unwrap_or(ctx);
 
             let mut total = 0usize;
+            let mut hit_cap = false;
             let mut first_out = true;
             let stdout = std::io::stdout();
             reset_truncation_state();
 
             for f in &files {
-                if total >= args.max_results { break }
+                if total >= args.max_results { hit_cap = true; break }
                 let content = match std::fs::read_to_string(&f.path) {
                     Ok(c) => c,
                     Err(_) => continue,
@@ -1611,8 +1674,8 @@ fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path], args: &MemoryArgs) {
             if !files_with_matches && !args.json {
                 println!("\n{} file{} with matches of {} scanned", total,
                     if total == 1 { "" } else { "s" }, files.len());
-                if total >= args.max_results {
-                    eprintln!("Hint: Result limit reached. Use --max-results to increase the limit.");
+                if hit_cap {
+                    eprintln!("Hint: Result limit reached. Use --max-results <n> to raise it, or --max-results 0 for unlimited.");
                 }
                 if get_did_truncate() {
                     eprintln!("Hint: Some lines were truncated. Use --max-line-width 0 for full output, or --max-line-width <n> to adjust.");
