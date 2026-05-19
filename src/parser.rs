@@ -27,6 +27,7 @@ pub enum Target {
     Attachment,
     Progress,
     PullRequest,
+    BridgeSession,
 }
 
 /// CLI/display name for a target. Paired with `FromStr` below — these two
@@ -54,6 +55,7 @@ impl fmt::Display for Target {
             Target::Attachment => "attachment",
             Target::Progress => "progress",
             Target::PullRequest => "pull-request",
+            Target::BridgeSession => "bridge-session",
         })
     }
 }
@@ -82,6 +84,7 @@ impl FromStr for Target {
             "attachment" => Target::Attachment,
             "progress" => Target::Progress,
             "pull-request" => Target::PullRequest,
+            "bridge-session" => Target::BridgeSession,
             _ => return Err(()),
         })
     }
@@ -113,7 +116,8 @@ impl Target {
             | Target::AgentName
             | Target::CustomTitle
             | Target::AiTitle
-            | Target::PermissionMode => false,
+            | Target::PermissionMode
+            | Target::BridgeSession => false,
         }
     }
 }
@@ -455,6 +459,23 @@ pub fn extract_from_entry(
                 out.push(ExtractedContent {
                     target: Target::PermissionMode,
                     text: mode.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        Some("bridge-session") => {
+            // Linkage metadata written when a local session is mirrored to a
+            // cloud "bridge" session — carries the bridge session id and the
+            // last synced sequence number, no human-authored text.
+            if targets.contains(&Target::BridgeSession) {
+                let bridge_id = entry["bridgeSessionId"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::BridgeSession,
+                    text: bridge_id.to_string(),
                     tool_name: None,
                     timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
@@ -967,7 +988,7 @@ mod tests {
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
-            Target::PullRequest,
+            Target::PullRequest, Target::BridgeSession,
         ].into_iter().collect()
     }
 
@@ -1556,7 +1577,7 @@ mod tests {
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
-            Target::PullRequest,
+            Target::PullRequest, Target::BridgeSession,
         ] {
             let s = t.to_string();
             let parsed: Target = s.parse().unwrap_or_else(|_| panic!("failed to parse {}", s));

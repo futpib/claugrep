@@ -408,6 +408,18 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a bridge-session record (local↔cloud session linkage metadata).
+    fn bridge_session(mut self, bridge_session_id: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "bridge-session",
+            "sessionId": sid,
+            "bridgeSessionId": bridge_session_id,
+            "lastSequenceNum": 0,
+        }));
+        self
+    }
+
     /// Write an empty attachment record with the given inner type.
     /// Used for the "not warned" tests — the record has no searchable content,
     /// but should still be recognized and silently consumed.
@@ -3512,6 +3524,26 @@ fn test_permission_mode_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "permission-mode records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
+fn test_bridge_session_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("bs-nowarn");
+    proj.session("sess-bsw")
+        .bridge_session("cse_01CgP1GYmBFp4958JrMXo395")
+        .user_message("hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "bridge-session records should not trigger unrecognized record warnings, got: {}", err);
 }
 
 #[test]

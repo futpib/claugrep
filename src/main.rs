@@ -284,6 +284,7 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::Attachment);
     t.insert(Target::Progress);
     t.insert(Target::PullRequest);
+    t.insert(Target::BridgeSession);
     t
 }
 
