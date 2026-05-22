@@ -490,6 +490,25 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a user message whose content is a single document block — e.g. a
+    /// PDF attached by the user. Documents surface as a short `[document: ...]`
+    /// marker in extracted output rather than triggering an unrecognized-block
+    /// warning.
+    fn user_document(mut self) -> Self {
+        let ts = self.next_ts();
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": [{
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="},
+            }]},
+            "timestamp": ts,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     /// Write a pull-request metadata record. These records have no `type`
     /// field; they're written when a session is associated with a GitHub PR.
     fn pull_request(mut self, repository: &str, number: u64) -> Self {
@@ -3591,6 +3610,31 @@ fn test_image_block_not_warned() {
     assert!(text.contains("[image: image/png"),
         "dump should show an image placeholder marker, got: {}", text);
     assert!(text.contains("UNIQUE_TEXT_AFTER_IMAGE"),
+        "text messages in the same session should still be extracted");
+}
+
+#[test]
+fn test_document_block_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("doc-nowarn");
+    proj.session("sess-docw")
+        .user_document()
+        .user_message("UNIQUE_TEXT_AFTER_DOCUMENT")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("unrecognized user content block type 'document'"),
+        "document content blocks should not trigger unrecognized block warnings, got: {}", err);
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("[document: application/pdf"),
+        "dump should show a document placeholder marker, got: {}", text);
+    assert!(text.contains("UNIQUE_TEXT_AFTER_DOCUMENT"),
         "text messages in the same session should still be extracted");
 }
 

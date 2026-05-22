@@ -632,6 +632,19 @@ fn extract_user(
                     });
                 }
             }
+            "document" => {
+                if let Some(target) = user_target.clone() {
+                    out.push(ExtractedContent {
+                        target,
+                        text: format_document_marker(block),
+                        tool_name: None,
+                        timestamp: timestamp.to_string(),
+                        session_id: session_id.to_string(),
+                        edit_diff: None,
+                        raw_entry: None,
+                    });
+                }
+            }
             other => {
                 eprintln!("warning: skipping unrecognized user content block type '{}'", other);
             }
@@ -728,6 +741,15 @@ fn format_attachment_delta(attachment: &serde_json::Value) -> Option<String> {
     Some(lines.join("\n"))
 }
 
+/// Decoded byte count of a base64 string without actually decoding it. Base64
+/// expands 3 bytes into 4 chars; trailing `=` padding tells us how many of the
+/// final 3 bytes are real.
+fn base64_decoded_len(data: &str) -> usize {
+    let padding = data.bytes().rev().take_while(|&b| b == b'=').count();
+    let upper = data.len() / 4 * 3;
+    upper - padding.min(upper)
+}
+
 /// Render an image content block as a short `[image: <mime>, <N> bytes]` marker so
 /// searches over user messages at least see that an image was present, even though
 /// the pixel data itself isn't searchable. For URL-sourced images, surface the URL
@@ -738,10 +760,7 @@ fn format_image_marker(source: &serde_json::Value) -> String {
     match source_type {
         "base64" => {
             let data = source["data"].as_str().unwrap_or("");
-            // Base64 expands 3 bytes into 4 chars; subtract padding for exactness.
-            let padding = data.bytes().rev().take_while(|&b| b == b'=').count();
-            let decoded = data.len() / 4 * 3 - padding.min(data.len() / 4 * 3);
-            format!("[image: {}, {} bytes]", media_type, decoded)
+            format!("[image: {}, {} bytes]", media_type, base64_decoded_len(data))
         }
         "url" => {
             let url = source["url"].as_str().unwrap_or("");
@@ -752,6 +771,49 @@ fn format_image_marker(source: &serde_json::Value) -> String {
             }
         }
         _ => format!("[image: {}]", media_type),
+    }
+}
+
+/// Render a document content block (e.g. a PDF attached to a user message) as a
+/// short `[document: <mime>, <N> bytes]` marker — the binary payload itself
+/// isn't searchable, but searches should at least see that an attachment was
+/// present, and an optional `title` is surfaced so a search for the filename
+/// can match. Mirrors the image marker's URL handling but covers the extra
+/// `text` and `file` source variants the Anthropic API allows for documents.
+fn format_document_marker(block: &serde_json::Value) -> String {
+    let source = &block["source"];
+    let source_type = source["type"].as_str().unwrap_or("");
+    let media_type = source["media_type"].as_str().unwrap_or("document");
+    let detail = match source_type {
+        "base64" => {
+            let data = source["data"].as_str().unwrap_or("");
+            format!("[document: {}, {} bytes]", media_type, base64_decoded_len(data))
+        }
+        "text" => {
+            let text = source["data"].as_str().unwrap_or("");
+            format!("[document: {}, {} bytes]", media_type, text.len())
+        }
+        "url" => {
+            let url = source["url"].as_str().unwrap_or("");
+            if url.is_empty() {
+                format!("[document: {}]", media_type)
+            } else {
+                format!("[document: {}, {}]", media_type, url)
+            }
+        }
+        "file" => {
+            let file_id = source["file_id"].as_str().unwrap_or("");
+            if file_id.is_empty() {
+                format!("[document: {}]", media_type)
+            } else {
+                format!("[document: {}, {}]", media_type, file_id)
+            }
+        }
+        _ => format!("[document: {}]", media_type),
+    };
+    match block["title"].as_str().filter(|s| !s.is_empty()) {
+        Some(title) => format!("{} {}", detail, title),
+        None => detail,
     }
 }
 
@@ -1428,6 +1490,44 @@ mod tests {
         let contents = extract_content(f.path(), &all_targets(), "s", false);
         let user = contents.iter().find(|c| c.target == Target::User).unwrap();
         assert_eq!(user.text, "[image: image/jpeg, https://example.com/pic.jpg]");
+    }
+
+    #[test]
+    fn test_document_user_block_renders_placeholder_marker() {
+        // Documents (e.g. PDFs attached to a user message) should produce a short
+        // `[document: <mime>, <N> bytes]` marker rather than triggering the
+        // "unrecognized block" warning. Sibling text blocks must still extract.
+        // "AAAA" is 4 base64 chars = 3 decoded bytes.
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AAAA"}},{"type":"text","text":"see attached"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let user_blocks: Vec<_> = contents.iter().filter(|c| c.target == Target::User).collect();
+        assert_eq!(user_blocks.len(), 2, "both document marker and text should be extracted");
+        assert_eq!(user_blocks[0].text, "[document: application/pdf, 3 bytes]");
+        assert_eq!(user_blocks[1].text, "see attached");
+    }
+
+    #[test]
+    fn test_document_url_source_renders_url_marker() {
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"document","source":{"type":"url","media_type":"application/pdf","url":"https://example.com/paper.pdf"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let user = contents.iter().find(|c| c.target == Target::User).unwrap();
+        assert_eq!(user.text, "[document: application/pdf, https://example.com/paper.pdf]");
+    }
+
+    #[test]
+    fn test_document_title_appended_to_marker() {
+        // A document's optional `title` (often the filename) should be surfaced
+        // so searches for the filename can match.
+        let f = write_jsonl(&[
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"AAAA"},"title":"resume.pdf"}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let user = contents.iter().find(|c| c.target == Target::User).unwrap();
+        assert_eq!(user.text, "[document: application/pdf, 3 bytes] resume.pdf");
     }
 
     #[test]
