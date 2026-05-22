@@ -95,7 +95,7 @@ fn test_before_search_far_future_finds_results() {
     }
     // With --before far-future, search should behave normally.
     let out = claugrep()
-        .args(["--before", "2099-01-01", "search", "claugrep", "--user", "--project", &home_project()])
+        .args(["--before", "2099-01-01", "search", "claugrep", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -199,7 +199,7 @@ fn test_search_finds_known_user_message() {
     }
     // "claugrep" appears in at least one user message (this very task was requested)
     let out = claugrep()
-        .args(["search", "claugrep", "--user", "--project", &home_project()])
+        .args(["search", "claugrep", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -232,7 +232,7 @@ fn test_search_json_output_structure() {
         return;
     }
     let out = claugrep()
-        .args(["search", "claugrep", "--user", "--json", "--project", &home_project()])
+        .args(["search", "claugrep", "-t", "user", "--json", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -254,11 +254,11 @@ fn test_search_case_insensitive() {
         return;
     }
     let _out_sensitive = claugrep()
-        .args(["search", "CLAUGREP", "--user", "--project", &home_project()])
+        .args(["search", "CLAUGREP", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
     let out_insensitive = claugrep()
-        .args(["search", "CLAUGREP", "--user", "--ignore-case", "--project", &home_project()])
+        .args(["search", "CLAUGREP", "-t", "user", "--ignore-case", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -277,7 +277,7 @@ fn test_search_sessions_with_matches_flag() {
         return;
     }
     let out = claugrep()
-        .args(["search", "claugrep", "--user", "--sessions-with-matches", "--project", &home_project()])
+        .args(["search", "claugrep", "-t", "user", "-l", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -297,7 +297,7 @@ fn test_search_sessions_with_matches_no_results_exits_nonzero() {
         return;
     }
     let out = claugrep()
-        .args(["search", "ZZZNOTFOUND9876543210", "--sessions-with-matches", "--project", &home_project()])
+        .args(["search", "ZZZNOTFOUND9876543210", "-l", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
     assert!(!out.status.success(), "should exit nonzero when no sessions match");
@@ -310,11 +310,11 @@ fn test_search_context_lines() {
         return;
     }
     let out_no_ctx = claugrep()
-        .args(["search", "claugrep", "--user", "--max-results", "1", "--project", &home_project()])
+        .args(["search", "claugrep", "-t", "user", "--max-results", "1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
     let out_with_ctx = claugrep()
-        .args(["search", "claugrep", "--user", "-C", "2", "--max-results", "1", "--project", &home_project()])
+        .args(["search", "claugrep", "-t", "user", "-C", "2", "--max-results", "1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -332,7 +332,7 @@ fn test_search_regex_pattern() {
     }
     // Regex alternation: match "claugrep" or "claudex"
     let out = claugrep()
-        .args(["search", "clau(grep|dex)", "--user", "--project", &home_project()])
+        .args(["search", "clau(grep|dex)", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
 
@@ -387,11 +387,19 @@ fn test_dump_targets_filter() {
 
     assert!(out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Every output line should be prefixed [assistant]
+    // Dump prints a `[<target>]` prefix once per record and then the message body
+    // (which may span many unprefixed lines). Only prefix-bearing lines should
+    // identify the target, and they must all be `[assistant]`.
+    let prefix = regex::Regex::new(r"^\[[a-z-]+\]").unwrap();
+    let mut saw_assistant_prefix = false;
     for line in stdout.lines() {
-        assert!(line.starts_with("[assistant]"),
-            "expected [assistant] prefix, got: {}", line);
+        if prefix.is_match(line) {
+            assert!(line.starts_with("[assistant]"),
+                "non-assistant prefix leaked through --targets assistant: {}", line);
+            saw_assistant_prefix = true;
+        }
     }
+    assert!(saw_assistant_prefix, "expected at least one [assistant] block in dump output");
 }
 
 #[test]
