@@ -28,6 +28,7 @@ pub enum Target {
     Progress,
     PullRequest,
     BridgeSession,
+    Mode,
 }
 
 /// CLI/display name for a target. Paired with `FromStr` below — these two
@@ -56,6 +57,7 @@ impl fmt::Display for Target {
             Target::Progress => "progress",
             Target::PullRequest => "pull-request",
             Target::BridgeSession => "bridge-session",
+            Target::Mode => "mode",
         })
     }
 }
@@ -85,6 +87,7 @@ impl FromStr for Target {
             "progress" => Target::Progress,
             "pull-request" => Target::PullRequest,
             "bridge-session" => Target::BridgeSession,
+            "mode" => Target::Mode,
             _ => return Err(()),
         })
     }
@@ -117,7 +120,8 @@ impl Target {
             | Target::CustomTitle
             | Target::AiTitle
             | Target::PermissionMode
-            | Target::BridgeSession => false,
+            | Target::BridgeSession
+            | Target::Mode => false,
         }
     }
 }
@@ -458,6 +462,23 @@ pub fn extract_from_entry(
                 let mode = entry["permissionMode"].as_str().unwrap_or("");
                 out.push(ExtractedContent {
                     target: Target::PermissionMode,
+                    text: mode.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        Some("mode") => {
+            // Session mode telemetry — `{"type":"mode","mode":"normal",...}`. A
+            // separate record from `permission-mode`; the `mode` value is always
+            // "normal" in observed transcripts and carries no human-authored text.
+            if targets.contains(&Target::Mode) {
+                let mode = entry["mode"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::Mode,
                     text: mode.to_string(),
                     tool_name: None,
                     timestamp: timestamp.to_string(),
@@ -1050,7 +1071,7 @@ mod tests {
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
-            Target::PullRequest, Target::BridgeSession,
+            Target::PullRequest, Target::BridgeSession, Target::Mode,
         ].into_iter().collect()
     }
 
@@ -1299,6 +1320,30 @@ mod tests {
         // Without PermissionMode in targets, the record should be silently skipped.
         let f = write_jsonl(&[
             r#"{"type":"permission-mode","permissionMode":"plan","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::User].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_mode() {
+        // Field order varies in the wild; serde_json is order-insensitive so the
+        // `type` dispatch matches either way.
+        let f = write_jsonl(&[
+            r#"{"mode":"normal","sessionId":"s","type":"mode"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let m = contents.iter().find(|c| c.target == Target::Mode);
+        assert!(m.is_some(), "should extract mode record");
+        assert_eq!(m.unwrap().text, "normal");
+    }
+
+    #[test]
+    fn test_mode_target_filtering() {
+        // Without Mode in targets, the record should be silently skipped.
+        let f = write_jsonl(&[
+            r#"{"type":"mode","mode":"normal","sessionId":"s"}"#,
         ]);
         let targets: HashSet<Target> = [Target::User].into_iter().collect();
         let contents = extract_content(f.path(), &targets, "s", false);
@@ -1677,7 +1722,7 @@ mod tests {
             Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
-            Target::PullRequest, Target::BridgeSession,
+            Target::PullRequest, Target::BridgeSession, Target::Mode,
         ] {
             let s = t.to_string();
             let parsed: Target = s.parse().unwrap_or_else(|_| panic!("failed to parse {}", s));

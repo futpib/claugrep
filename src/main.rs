@@ -285,6 +285,7 @@ fn all_targets() -> HashSet<Target> {
     t.insert(Target::Progress);
     t.insert(Target::PullRequest);
     t.insert(Target::BridgeSession);
+    t.insert(Target::Mode);
     t
 }
 
@@ -380,7 +381,7 @@ pull-request.\n\n\
 Types: user, assistant, thinking, bash-command, bash-output, tool-use, \
 tool-result, subagent-prompt, compact-summary, system, file-history-snapshot, \
 queue-operation, last-prompt, agent-name, custom-title, ai-title, permission-mode, \
-attachment, progress, pull-request.\n\n\
+attachment, progress, pull-request, bridge-session, mode.\n\n\
 Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
 
 fn parse_targets_or_exit(s: &str) -> TargetSelector {

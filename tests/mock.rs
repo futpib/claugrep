@@ -420,6 +420,17 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a mode record (session input-mode telemetry).
+    fn mode(mut self, mode: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "mode",
+            "mode": mode,
+            "sessionId": sid,
+        }));
+        self
+    }
+
     /// Write an empty attachment record with the given inner type.
     /// Used for the "not warned" tests — the record has no searchable content,
     /// but should still be recognized and silently consumed.
@@ -3566,6 +3577,26 @@ fn test_bridge_session_not_warned() {
 }
 
 #[test]
+fn test_mode_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("mode-nowarn");
+    proj.session("sess-modew")
+        .mode("normal")
+        .user_message("hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "mode records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
 fn test_attachment_not_warned() {
     let world = MockWorld::new();
     let proj = world.project("att-nowarn");
@@ -3798,6 +3829,55 @@ fn test_dump_permission_mode() {
     assert!(text.contains("bypassPermissions"), "dump should show permission mode value");
     assert!(!text.contains("hello user"), "should not show user messages");
     assert!(!text.contains("hello assistant"), "should not show assistant messages");
+}
+
+#[test]
+fn test_search_mode() {
+    let world = MockWorld::new();
+    let proj = world.project("mode-search");
+    proj.session("sess-modes")
+        .user_message("hello")
+        .mode("UNIQUE_MODE_XYZ")
+        .assistant_message("hi")
+        .done();
+
+    // -t mode finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_MODE_XYZ", "-t", "mode", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t mode should find mode records");
+
+    // default targets should NOT find mode records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_MODE_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "mode records should not appear in default targets");
+}
+
+#[test]
+fn test_search_mode_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("mode-all");
+    proj.session("sess-modea")
+        .user_message("hello")
+        .mode("UNIQUE_MODE_ALL_SEARCH")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_MODE_ALL_SEARCH", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include mode records");
 }
 
 #[test]
