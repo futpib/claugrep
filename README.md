@@ -36,16 +36,6 @@ Commands:
   tail      Show the last N records of a session (like tail)
 ```
 
-### Behavior changes (recent)
-
-- `claugrep last` now defaults to the **current project** (was: all projects). Pass `--all-projects` to restore the cross-project activity feed.
-- `claugrep last` now hides subagent records by default (was: showed them). Pass `--subagents` to include them.
-- `claugrep dump` now respects `--max-line-width`.
-- `claugrep dump` and `claugrep tail` accept `--session <id>` as a flag in addition to the positional `<SESSION>` argument.
-- `claugrep sessions`, `claugrep last`, `claugrep projects` accept `--all-projects` and `-P/--project-regexp` for cross-project listings.
-- `claugrep dump`, `claugrep tail`, and `claugrep memory dump|search` reject `--all-projects`/`-P` at runtime (single-project commands).
-- `-l/--list` is now the canonical long form on `claugrep search` and `claugrep memory search` (with `--sessions-with-matches`/`--files-with-matches` kept as aliases).
-
 ### Global options
 
 These options are accepted by every subcommand. Subcommands ignore options they don't use.
