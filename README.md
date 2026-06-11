@@ -104,10 +104,12 @@ The project path is resolved to a canonical absolute path and matched against th
 | `subagent-prompt` | Subagent prompts |
 | `compact-summary` | Compact/continuation summaries |
 | `queue-operation` | Queue operations |
+| `custom-title` | User-set session titles |
+| `ai-title` | AI-generated session titles |
 | `system` | System messages (internal) |
 | `file-history-snapshot` | File history snapshots (internal) |
 
-Use `TYPE.SUBTYPE` for narrower filters (e.g. `system.away_summary`, `tool-use.Edit`). The keyword `default` selects standard types; `all` includes internal types.
+Use `TYPE.SUBTYPE` for narrower filters (e.g. `system.away_summary`, `tool-use.Edit`). The keyword `default` selects standard types (including session titles); `all` includes internal types.
 
 ### `claugrep search`
 
@@ -160,7 +162,7 @@ When `--json` is combined with any record-context flag, each match is wrapped as
 claugrep sessions [GLOBAL OPTIONS]
 ```
 
-Lists sessions for a project (or every project, with `--all-projects` / `-P`), newest first. Subagent sessions are hidden by default; pass `--subagents` to include them. With `--all-projects`/`-P`, output is grouped by project (per-project header in plain text, `[{project, sessions[]}, ...]` in JSON).
+Lists sessions for a project (or every project, with `--all-projects` / `-P`), newest first. Each row shows the session's title next to its ID — the user-set custom title if there is one, otherwise the auto-generated AI title. The JSON output carries this as a `title` field (`null` when the session has neither). Subagent sessions are hidden by default; pass `--subagents` to include them. With `--all-projects`/`-P`, output is grouped by project (per-project header in plain text, `[{project, sessions[]}, ...]` in JSON).
 
 ### `claugrep projects`
 

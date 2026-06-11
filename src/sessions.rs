@@ -359,6 +359,47 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, con
     result
 }
 
+/// The session's display title: the most recent user-set `custom-title` if the
+/// session has one, otherwise the most recent `ai-title`. Returns `None` when
+/// the session has neither. Title records are rewritten frequently, so the last
+/// occurrence wins.
+pub fn session_title(file_path: &Path) -> Option<String> {
+    use std::io::BufRead;
+    let file = fs::File::open(file_path).ok()?;
+    let mut custom: Option<String> = None;
+    let mut ai: Option<String> = None;
+    for line in io::BufReader::new(file).lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        // Cheap pre-filter: skip lines that can't be a title record.
+        if !line.contains("\"custom-title\"") && !line.contains("\"ai-title\"") {
+            continue;
+        }
+        let entry: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        match entry["type"].as_str() {
+            Some("custom-title") => {
+                let t = entry["customTitle"].as_str().unwrap_or("");
+                if !t.is_empty() {
+                    custom = Some(t.to_string());
+                }
+            }
+            Some("ai-title") => {
+                let t = entry["aiTitle"].as_str().unwrap_or("");
+                if !t.is_empty() {
+                    ai = Some(t.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    custom.or(ai)
+}
+
 /// Resolve a session selector: numeric offset, UUID prefix, or "all"
 pub fn resolve_session(selector: Option<&str>, sessions: &[SessionFile]) -> Result<Vec<SessionFile>, String> {
     let selector = match selector {

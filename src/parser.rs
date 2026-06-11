@@ -348,7 +348,23 @@ pub fn extract_content_opts(
             Err(e) => eprintln!("warning: {}: line {}: {}", path.display(), line_num + 1, e),
         }
     }
+    dedupe_session_titles(&mut results);
     results
+}
+
+/// `custom-title`/`ai-title` records are rewritten on nearly every session
+/// event, so one session can hold dozens of identical title entries. Collapse
+/// exact duplicates (same target, session, and text) to a single record so a
+/// title surfaces once instead of flooding results. Distinct titles (e.g. a
+/// renamed session) are preserved.
+fn dedupe_session_titles(results: &mut Vec<ExtractedContent>) {
+    let mut seen: HashSet<(Target, String, String)> = HashSet::new();
+    results.retain(|r| match r.target {
+        Target::CustomTitle | Target::AiTitle => {
+            seen.insert((r.target.clone(), r.session_id.clone(), r.text.clone()))
+        }
+        _ => true,
+    });
 }
 
 pub fn extract_from_entry(

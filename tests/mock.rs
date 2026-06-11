@@ -1948,6 +1948,7 @@ fn test_sessions_json_output() {
     assert!(first["sessionId"].is_string());
     assert!(first["filePath"].is_string());
     assert!(first["mtime"].is_number());
+    assert!(first["title"].is_null(), "untitled session should have a null title");
 }
 
 #[test]
@@ -3368,14 +3369,15 @@ fn test_search_custom_title() {
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
         "-t custom-title should find custom-title records");
 
-    // default targets should NOT find custom-title records
-    let miss = world
+    // default targets now include titles, so a plain search finds them too
+    let dflt = world
         .cmd()
         .args(["search", "UNIQUE_CUSTOM_TITLE_XYZ", "--project", proj.path()])
         .output()
         .unwrap();
-    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
-        "custom-title records should not appear in default targets");
+    assert!(dflt.status.success());
+    assert!(!strip_ansi(stdout(&dflt)).contains("No matches found"),
+        "custom-title records should appear in default targets");
 }
 
 #[test]
@@ -3420,7 +3422,7 @@ fn test_dump_custom_title() {
 }
 
 #[test]
-fn test_custom_title_not_in_default_not_warned() {
+fn test_custom_title_record_not_warned() {
     let world = MockWorld::new();
     let proj = world.project("ct-nowarn");
     proj.session("sess-ctw")
@@ -3462,13 +3464,14 @@ fn test_search_ai_title() {
     assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
         "-t ai-title should find ai-title records");
 
-    let miss = world
+    let dflt = world
         .cmd()
         .args(["search", "UNIQUE_AI_TITLE_XYZ", "--project", proj.path()])
         .output()
         .unwrap();
-    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
-        "ai-title records should not appear in default targets");
+    assert!(dflt.status.success());
+    assert!(!strip_ansi(stdout(&dflt)).contains("No matches found"),
+        "ai-title records should appear in default targets");
 }
 
 #[test]
@@ -3513,7 +3516,7 @@ fn test_dump_ai_title() {
 }
 
 #[test]
-fn test_ai_title_not_in_default_not_warned() {
+fn test_ai_title_record_not_warned() {
     let world = MockWorld::new();
     let proj = world.project("at-nowarn");
     proj.session("sess-atw")
@@ -3530,6 +3533,115 @@ fn test_ai_title_not_in_default_not_warned() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(!err.contains("warning: skipping unrecognized record"),
         "ai-title records should not trigger unrecognized record warnings");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// title dedupe and the sessions title column
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_default_search_dedupes_repeated_title() {
+    let world = MockWorld::new();
+    let proj = world.project("ct-dedupe");
+    let mut s = proj.session("sess-dedupe").user_message("hello");
+    for _ in 0..5 {
+        s = s.custom_title("REPEATED_TITLE_ABC");
+    }
+    s.done();
+
+    let out = world
+        .cmd()
+        .args(["search", "REPEATED_TITLE_ABC", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    let count = text.matches("REPEATED_TITLE_ABC").count();
+    assert_eq!(count, 1,
+        "identical repeated title should be deduped to a single match, got {count}:\n{text}");
+}
+
+#[test]
+fn test_sessions_shows_title() {
+    let world = MockWorld::new();
+    let proj = world.project("sess-title");
+    proj.session("sess-titled")
+        .user_message("hello")
+        .custom_title("MY_SESSION_NAME")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("MY_SESSION_NAME"),
+        "sessions listing should show the session title:\n{text}");
+    assert!(text.contains("sess-titled"), "should still show the session id:\n{text}");
+}
+
+#[test]
+fn test_sessions_title_prefers_custom_over_ai() {
+    let world = MockWorld::new();
+    let proj = world.project("sess-title-pref");
+    proj.session("sess-pref")
+        .user_message("hello")
+        .ai_title("AI_GENERATED_NAME")
+        .custom_title("USER_SET_NAME")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("USER_SET_NAME"),
+        "should prefer the user-set custom title:\n{text}");
+    assert!(!text.contains("AI_GENERATED_NAME"),
+        "should not show the ai title when a custom title exists:\n{text}");
+}
+
+#[test]
+fn test_sessions_falls_back_to_ai_title() {
+    let world = MockWorld::new();
+    let proj = world.project("sess-ai-title");
+    proj.session("sess-ai")
+        .user_message("hello")
+        .ai_title("AI_ONLY_NAME")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["sessions", "--project", proj.path()])
+        .output()
+        .unwrap();
+    let text = strip_ansi(stdout(&out));
+    assert!(text.contains("AI_ONLY_NAME"),
+        "sessions listing should fall back to the ai title:\n{text}");
+}
+
+#[test]
+fn test_sessions_json_includes_title() {
+    let world = MockWorld::new();
+    let proj = world.project("sess-json-title");
+    proj.session("sess-jt")
+        .user_message("hi")
+        .custom_title("JSON_TITLE_NAME")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["sessions", "--json", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(stdout(&out)).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["title"].as_str(), Some("JSON_TITLE_NAME"));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

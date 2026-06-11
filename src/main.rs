@@ -279,7 +279,7 @@ fn default_targets() -> HashSet<Target> {
     [
         Target::User, Target::Assistant, Target::Thinking, Target::BashCommand, Target::BashOutput,
         Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
-        Target::QueueOperation,
+        Target::QueueOperation, Target::CustomTitle, Target::AiTitle,
     ].into_iter().collect()
 }
 
@@ -404,7 +404,7 @@ Types: user, assistant, thinking, bash-command, bash-output, tool-use, \
 tool-result, subagent-prompt, compact-summary, system, file-history-snapshot, \
 queue-operation, last-prompt, agent-name, custom-title, ai-title, permission-mode, \
 attachment, progress, pull-request, bridge-session, mode.\n\n\
-Aliases: \"default\" = standard types (also includes system.away_summary recaps), \"all\" = everything.";
+Aliases: \"default\" = standard types (also includes session titles and system.away_summary recaps), \"all\" = everything.";
 
 fn parse_targets_or_exit(s: &str) -> TargetSelector {
     parse_targets(s).unwrap_or_else(|e| {
@@ -1247,6 +1247,15 @@ fn main() {
             }
 
             if json {
+                fn title_json(s: &sessions::SessionFile) -> serde_json::Value {
+                    if s.is_subagent {
+                        return serde_json::Value::Null;
+                    }
+                    match sessions::session_title(&s.file_path) {
+                        Some(t) => json!(t),
+                        None => serde_json::Value::Null,
+                    }
+                }
                 let output: serde_json::Value = if is_multi {
                     let arr: Vec<_> = session_groups.iter().map(|(label, sessions)| {
                         let sess_json: Vec<_> = sessions.iter().map(|s| {
@@ -1258,6 +1267,7 @@ fn main() {
                                 "mtime": mtime,
                                 "isSubagent": s.is_subagent,
                                 "backend": s.backend,
+                                "title": title_json(s),
                             })
                         }).collect();
                         json!({
@@ -1277,6 +1287,7 @@ fn main() {
                             "mtime": mtime,
                             "isSubagent": s.is_subagent,
                             "backend": s.backend,
+                            "title": title_json(s),
                         })
                     }).collect();
                     json!(arr)
@@ -1296,7 +1307,15 @@ fn main() {
                     for s in sessions {
                         let mtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
                         let suffix = if s.is_subagent { " [subagent]" } else { "" };
-                        println!("{} {}{}", mtime.format("%Y-%m-%d %H:%M:%S"), s.session_id, suffix);
+                        let title_part = if s.is_subagent {
+                            String::new()
+                        } else {
+                            match sessions::session_title(&s.file_path) {
+                                Some(t) => format!("  {}", console::style(t).dim()),
+                                None => String::new(),
+                            }
+                        };
+                        println!("{} {}{}{}", mtime.format("%Y-%m-%d %H:%M:%S"), s.session_id, title_part, suffix);
                         total += 1;
                     }
                 }
