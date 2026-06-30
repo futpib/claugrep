@@ -49,6 +49,31 @@ fn encode_project_path(path: &str) -> String {
     path.replace(['/', '.'], "-")
 }
 
+/// Per-backend description of where instruction / memory files live.
+///
+/// Claude Code looks for `CLAUDE.md` / `CLAUDE.local.md` with a managed policy
+/// at `/etc/claude-code/CLAUDE.md` and an auto-memory tree; opencode looks for
+/// `AGENTS.md` with no managed policy and (currently) no auto-memory. Both are
+/// just different [`MemoryLayout`]s fed to the same generic walker.
+pub struct MemoryLayout {
+    /// Filenames searched at every level (managed, global, ancestor, subdir).
+    pub filenames: Vec<String>,
+    /// System-wide managed policy path, if the backend defines one.
+    pub managed_policy: Option<PathBuf>,
+    /// Per-account / global config roots that may hold a top-level file.
+    pub config_dirs: Vec<PathBuf>,
+    /// Auto-memory system (Claude's `MEMORY.md` + per-topic files), if any.
+    pub auto_memory: Option<AutoMemoryLayout>,
+}
+
+/// Auto-memory configuration: a set of roots each holding
+/// `<root>/projects/<encoded-cwd>/memory/{MEMORY.md,*.md}`.
+pub struct AutoMemoryLayout {
+    pub roots: Vec<PathBuf>,
+    /// Encoder for the cwd → directory-name segment (Claude: `/`/`.` → `-`).
+    pub encode: fn(&str) -> String,
+}
+
 /// Directories skipped during the on-demand subdirectory scan. Matches the common
 /// ignore set Claude itself doesn't descend into, plus VCS/build output.
 fn is_ignored_dir(name: &str) -> bool {
@@ -61,17 +86,34 @@ fn is_ignored_dir(name: &str) -> bool {
 }
 
 /// Discover every markdown memory file that would apply to `cwd` if a Claude Code
-/// session started there, in load order:
-///   1. Managed policy
-///   2. User global (+ imports) — per config dir
-///   3. Ancestor CLAUDE.md files from root down to cwd (+ imports)
-///   4. Subdir CLAUDE.md files (on-demand)
-///   5. Auto-memory index + topic files — per config dir
+/// session started there, in load order. This is the Claude layout; other backends
+/// call [`discover_with_layout`] with their own [`MemoryLayout`].
 ///
 /// `config_dirs` lets callers pass the default plus every claudex account root so
 /// per-account user-global files and per-account auto-memory dirs are all included.
 /// `cwd` should already be canonicalized by the caller.
 pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs: bool) -> Vec<MemoryFile> {
+    let layout = MemoryLayout {
+        filenames: vec!["CLAUDE.md".to_string(), "CLAUDE.local.md".to_string()],
+        managed_policy: Some(PathBuf::from("/etc/claude-code/CLAUDE.md")),
+        config_dirs: config_dirs.iter().map(|p| p.to_path_buf()).collect(),
+        auto_memory: Some(AutoMemoryLayout {
+            roots: config_dirs.iter().map(|p| p.to_path_buf()).collect(),
+            encode: encode_project_path,
+        }),
+    };
+    discover_with_layout(cwd, &layout, include_subdirs)
+}
+
+/// Generic memory-file walker parameterized by a backend's [`MemoryLayout`].
+///
+/// Load order:
+///   1. Managed policy (+ imports)
+///   2. User global per config root (+ imports)
+///   3. Ancestor instruction files from root down to cwd (+ imports)
+///   4. Subdir instruction files (on-demand, + imports)
+///   5. Auto-memory index + topic files (Claude only, per root)
+pub fn discover_with_layout(cwd: &Path, layout: &MemoryLayout, include_subdirs: bool) -> Vec<MemoryFile> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut result: Vec<MemoryFile> = Vec::new();
 
@@ -80,23 +122,25 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
             result.push(file);
         }
     };
+    let filenames: Vec<&str> = layout.filenames.iter().map(|s| s.as_str()).collect();
 
     // 1. Managed policy
-    let managed = PathBuf::from("/etc/claude-code/CLAUDE.md");
-    if managed.is_file() {
-        push(&mut result, &mut seen, MemoryFile {
-            path: managed.clone(), source: MemorySource::ManagedPolicy, imported_by: None,
-        });
-        for imp in collect_imports(&managed, 5) {
+    if let Some(managed) = &layout.managed_policy {
+        if managed.is_file() {
             push(&mut result, &mut seen, MemoryFile {
-                path: imp, source: MemorySource::Import, imported_by: Some(managed.clone()),
+                path: managed.clone(), source: MemorySource::ManagedPolicy, imported_by: None,
             });
+            for imp in collect_imports(managed, 5) {
+                push(&mut result, &mut seen, MemoryFile {
+                    path: imp, source: MemorySource::Import, imported_by: Some(managed.clone()),
+                });
+            }
         }
     }
 
     // 2. User global — one pass per config dir
-    for config_dir in config_dirs {
-        for name in ["CLAUDE.md", "CLAUDE.local.md"] {
+    for config_dir in &layout.config_dirs {
+        for name in &filenames {
             let p = config_dir.join(name);
             if p.is_file() {
                 push(&mut result, &mut seen, MemoryFile {
@@ -111,7 +155,7 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
         }
     }
 
-    // 3. Walk up from cwd to /, collecting CLAUDE.md files. Emit far-to-near.
+    // 3. Walk up from cwd to /, collecting instruction files. Emit far-to-near.
     let mut ancestors: Vec<PathBuf> = Vec::new();
     {
         let mut current = Some(cwd.to_path_buf());
@@ -122,7 +166,7 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
     }
     ancestors.reverse();
     for dir in &ancestors {
-        for name in ["CLAUDE.md", "CLAUDE.local.md"] {
+        for name in &filenames {
             let p = dir.join(name);
             if p.is_file() && !seen.contains(&p) {
                 push(&mut result, &mut seen, MemoryFile {
@@ -137,9 +181,9 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
         }
     }
 
-    // 4. On-demand subdir CLAUDE.md files (skipped if opted-out).
+    // 4. On-demand subdir files (skipped if opted-out).
     if include_subdirs {
-        for p in find_subdir_claude_md(cwd) {
+        for p in find_subdir_md(cwd, &filenames) {
             if !seen.contains(&p) {
                 push(&mut result, &mut seen, MemoryFile {
                     path: p.clone(), source: MemorySource::Subdir, imported_by: None,
@@ -153,32 +197,32 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
         }
     }
 
-    // 5. Auto-memory — one pass per config dir
-    let cwd_str = cwd.to_string_lossy();
-    for config_dir in config_dirs {
-        let project_mem_dir = config_dir
-            .join("projects")
-            .join(encode_project_path(&cwd_str))
-            .join("memory");
+    // 5. Auto-memory — one pass per root
+    if let Some(am) = &layout.auto_memory {
+        let cwd_str = cwd.to_string_lossy();
+        let encoded = (am.encode)(&cwd_str);
+        for root in &am.roots {
+            let project_mem_dir = root.join("projects").join(&encoded).join("memory");
 
-        let index = project_mem_dir.join("MEMORY.md");
-        if index.is_file() {
-            push(&mut result, &mut seen, MemoryFile {
-                path: index, source: MemorySource::AutoMemoryIndex, imported_by: None,
-            });
-        }
-        if let Ok(entries) = fs::read_dir(&project_mem_dir) {
-            let mut topic: Vec<PathBuf> = entries.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_file()
-                    && p.extension().map(|e| e == "md").unwrap_or(false)
-                    && p.file_name().map(|n| n != "MEMORY.md").unwrap_or(false))
-                .collect();
-            topic.sort();
-            for p in topic {
+            let index = project_mem_dir.join("MEMORY.md");
+            if index.is_file() {
                 push(&mut result, &mut seen, MemoryFile {
-                    path: p, source: MemorySource::AutoMemoryTopic, imported_by: None,
+                    path: index, source: MemorySource::AutoMemoryIndex, imported_by: None,
                 });
+            }
+            if let Ok(entries) = fs::read_dir(&project_mem_dir) {
+                let mut topic: Vec<PathBuf> = entries.flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file()
+                        && p.extension().map(|e| e == "md").unwrap_or(false)
+                        && p.file_name().map(|n| n != "MEMORY.md").unwrap_or(false))
+                    .collect();
+                topic.sort();
+                for p in topic {
+                    push(&mut result, &mut seen, MemoryFile {
+                        path: p, source: MemorySource::AutoMemoryTopic, imported_by: None,
+                    });
+                }
             }
         }
     }
@@ -186,9 +230,9 @@ pub fn discover_memory_files(cwd: &Path, config_dirs: &[&Path], include_subdirs:
     result
 }
 
-/// Recursively find `CLAUDE.md` / `CLAUDE.local.md` under `root`, excluding the
-/// immediate root (those are emitted as Ancestor) and common ignore directories.
-fn find_subdir_claude_md(root: &Path) -> Vec<PathBuf> {
+/// Recursively find any of `filenames` under `root`, excluding the immediate
+/// root (those are emitted as Ancestor) and common ignore directories.
+fn find_subdir_md(root: &Path, filenames: &[&str]) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
 
@@ -205,7 +249,7 @@ fn find_subdir_claude_md(root: &Path) -> Vec<PathBuf> {
                 stack.push(path);
             } else if ft.is_file() {
                 let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
-                if (fname == "CLAUDE.md" || fname == "CLAUDE.local.md")
+                if filenames.iter().any(|want| *want == fname)
                     && path.parent() != Some(root)
                 {
                     out.push(path);

@@ -7,8 +7,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-fn claugrep() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_claugrep"))
+fn claugrep_claude() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_claugrep"));
+    c.args(["--backend", "claude"]);
+    c
+}
+
+fn claugrep_opencode() -> Command {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_claugrep"));
+    c.args(["--backend", "opencode"]);
+    c
 }
 
 fn home_dir() -> PathBuf {
@@ -29,6 +37,28 @@ fn project_has_sessions(project: &str) -> bool {
     dir.exists()
 }
 
+/// Return true if the opencode SQLite DB exists and has at least one session
+/// for `project`.
+fn opencode_has_sessions(project: &str) -> bool {
+    let db = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| home_dir().parent().map(|_| home_dir().join(".local/share")))
+        .unwrap_or_else(|| home_dir().join(".local/share"))
+        .join("opencode")
+        .join("opencode.db");
+    if !db.is_file() {
+        return false;
+    }
+    let out = claugrep_opencode()
+        .args(["sessions", "--project", project])
+        .output();
+    match out {
+        Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
 // ── --before / --until date filter ────────────────────────────────────────────
 
 #[test]
@@ -38,7 +68,7 @@ fn test_before_far_future_shows_all_sessions() {
         return;
     }
     // All sessions should pre-date year 2099 — result should be non-empty.
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["--before", "2099-01-01", "sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -55,7 +85,7 @@ fn test_before_ancient_past_exits_nonzero() {
         return;
     }
     // No sessions exist from before 1971 — should exit nonzero.
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["--before", "1971-01-01", "sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -69,11 +99,11 @@ fn test_until_alias_matches_before() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out_before = claugrep()
+    let out_before = claugrep_claude()
         .args(["--before", "2099-01-01", "sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
-    let out_until = claugrep()
+    let out_until = claugrep_claude()
         .args(["--until", "2099-01-01", "sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -94,7 +124,7 @@ fn test_before_search_far_future_finds_results() {
         return;
     }
     // With --before far-future, search should behave normally.
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["--before", "2099-01-01", "search", "claugrep", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -111,7 +141,7 @@ fn test_after_and_before_combined_wide_window() {
         return;
     }
     // A window from 1970 to 2099 should include all sessions.
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["--after", "1970-01-01", "--before", "2099-01-01",
                "sessions", "--project", &home_project()])
         .output()
@@ -124,7 +154,7 @@ fn test_after_and_before_combined_wide_window() {
 
 #[test]
 fn test_before_invalid_date_exits_nonzero() {
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["--before", "not-a-valid-date-xyz", "sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -142,7 +172,7 @@ fn test_sessions_lists_home_project() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["sessions", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -161,7 +191,7 @@ fn test_sessions_json_output() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["sessions", "--project", &home_project(), "--json"])
         .output()
         .expect("failed to run claugrep");
@@ -182,7 +212,7 @@ fn test_sessions_json_output() {
 
 #[test]
 fn test_sessions_missing_project_exits_nonzero() {
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["sessions", "--project", "/nonexistent/path/xyz"])
         .output()
         .expect("failed to run claugrep");
@@ -198,7 +228,7 @@ fn test_search_finds_known_user_message() {
         return;
     }
     // "claugrep" appears in at least one user message (this very task was requested)
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "claugrep", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -215,7 +245,7 @@ fn test_search_no_matches_exits_zero_with_message() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "ZZZNOTFOUNDSTRING9876543210", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -231,7 +261,7 @@ fn test_search_json_output_structure() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "claugrep", "-t", "user", "--json", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -253,11 +283,11 @@ fn test_search_case_insensitive() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let _out_sensitive = claugrep()
+    let _out_sensitive = claugrep_claude()
         .args(["search", "CLAUGREP", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
-    let out_insensitive = claugrep()
+    let out_insensitive = claugrep_claude()
         .args(["search", "CLAUGREP", "-t", "user", "--ignore-case", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -276,7 +306,7 @@ fn test_search_sessions_with_matches_flag() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "claugrep", "-t", "user", "-l", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -296,7 +326,7 @@ fn test_search_sessions_with_matches_no_results_exits_nonzero() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "ZZZNOTFOUND9876543210", "-l", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -309,11 +339,11 @@ fn test_search_context_lines() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out_no_ctx = claugrep()
+    let out_no_ctx = claugrep_claude()
         .args(["search", "claugrep", "-t", "user", "--max-results", "1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
-    let out_with_ctx = claugrep()
+    let out_with_ctx = claugrep_claude()
         .args(["search", "claugrep", "-t", "user", "-C", "2", "--max-results", "1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -331,7 +361,7 @@ fn test_search_regex_pattern() {
         return;
     }
     // Regex alternation: match "claugrep" or "claudex"
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["search", "clau(grep|dex)", "-t", "user", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -349,7 +379,7 @@ fn test_dump_first_session() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["dump", "1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -366,7 +396,7 @@ fn test_dump_negative_offset() {
         return;
     }
     // -1 means "second latest session" — should work without needing `-- -1`
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["dump", "-1", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -380,7 +410,7 @@ fn test_dump_targets_filter() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["dump", "1", "--targets", "assistant", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
@@ -408,9 +438,112 @@ fn test_dump_missing_session_exits_nonzero() {
         eprintln!("SKIP: no Claude sessions found");
         return;
     }
-    let out = claugrep()
+    let out = claugrep_claude()
         .args(["dump", "nonexistent-session-id", "--project", &home_project()])
         .output()
         .expect("failed to run claugrep");
     assert!(!out.status.success());
+}
+
+// ── opencode backend ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_opencode_sessions_list() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    let out = claugrep_opencode()
+        .args(["sessions", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.trim().is_empty(), "expected at least one opencode session");
+}
+
+#[test]
+fn test_opencode_sessions_json_backend_tag() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    let out = claugrep_opencode()
+        .args(["sessions", "--project", &home_project(), "--json"])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success());
+    let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .expect("valid JSON");
+    let arr = parsed.as_array().expect("JSON array");
+    assert!(!arr.is_empty());
+    assert_eq!(arr[0]["backend"].as_str(), Some("opencode"));
+}
+
+#[test]
+fn test_opencode_search_user_message() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    // "opencode" appears in many user messages in this project's opencode sessions.
+    let out = claugrep_opencode()
+        .args(["search", "opencode", "-t", "user", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("opencode"), "expected a match; stdout:\n{}", stdout);
+}
+
+#[test]
+fn test_opencode_search_json_raw_entry_is_part() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    let out = claugrep_opencode()
+        .args(["search", "opencode", "-t", "user", "--json", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "should have at least one JSON line");
+    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
+    // opencode raw entries are part rows: type ∈ {text, reasoning, tool, …}
+    assert!(first["type"].is_string(), "raw part should have a type field");
+    let known = ["text", "reasoning", "tool", "compaction", "step-start", "step-finish", "patch"];
+    assert!(known.contains(&first["type"].as_str().unwrap_or("")),
+        "unexpected part type: {:?}", first["type"]);
+}
+
+#[test]
+fn test_opencode_dump_works() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    let out = claugrep_opencode()
+        .args(["dump", "1", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.trim().is_empty(), "dump should produce output");
+}
+
+#[test]
+fn test_opencode_tool_search_case_insensitive_subtype() {
+    if !opencode_has_sessions(&home_project()) {
+        eprintln!("SKIP: no opencode sessions found");
+        return;
+    }
+    // opencode stamps tool names lowercase ("bash"); the filter should match
+    // case-insensitively so `-t tool-use.bash` finds them.
+    let out = claugrep_opencode()
+        .args(["search", "ls", "-t", "bash-command", "--project", &home_project()])
+        .output()
+        .expect("failed to run claugrep");
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
 }

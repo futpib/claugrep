@@ -3,6 +3,8 @@ mod sessions;
 mod search;
 mod output;
 mod memory;
+mod source;
+mod backends;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -13,11 +15,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use serde_json::json;
 
-use crate::sessions::{discover_sessions, discover_projects, resolve_session, discover_sessions_with_worktrees};
+use crate::source::Source;
+use crate::sessions::{resolve_session, ProjectInfo};
 use crate::search::{search_sessions, SearchOptions, find_matches};
 use crate::output::{format_diff, format_edit_diff, format_match, format_summary, format_project_header, format_multi_summary, reset_truncation_state, get_did_truncate, format_record};
 use crate::parser::{QualifiedTarget, Target, TargetSelector};
-use crate::memory::{discover_memory_files, MemoryFile};
+use crate::memory::MemoryFile;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ColorWhen {
@@ -27,6 +30,17 @@ enum ColorWhen {
     Always,
     /// Never colorize output
     Never,
+}
+
+/// Which transcript backend(s) to read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum BackendSel {
+    /// Use every backend that has data (Claude JSONL + opencode SQLite + …).
+    Auto,
+    /// Only the Claude Code JSONL backend.
+    Claude,
+    /// Only the opencode SQLite backend.
+    Opencode,
 }
 
 #[derive(Parser)]
@@ -39,6 +53,14 @@ struct Cli {
     /// Filter to a specific account (claudex multi-account support)
     #[arg(long, global = true)]
     account: Option<String>,
+
+    /// Backend(s) to read: auto (default), claude, or opencode
+    #[arg(long, global = true, value_enum, default_value_t = BackendSel::Auto)]
+    backend: BackendSel,
+
+    /// Path to the opencode SQLite DB (default: $XDG_DATA_HOME/opencode/opencode.db)
+    #[arg(long = "opencode-db", global = true, value_name = "PATH")]
+    opencode_db: Option<PathBuf>,
 
     /// When to use colors: auto, always, never (also respects NO_COLOR env var)
     #[arg(long, global = true, default_value = "auto", value_name = "WHEN")]
@@ -565,26 +587,11 @@ fn effective_config_dirs(config_dir: Option<&PathBuf>, account: Option<&str>) ->
     dirs
 }
 
-/// Discover sessions across all config dirs for a given project path, deduplicating by file path.
-fn discover_sessions_across_configs(project_path: &str, config_dirs: &[(Option<String>, PathBuf)]) -> Vec<sessions::SessionFile> {
-    let mut seen_paths = std::collections::HashSet::new();
-    let mut all = vec![];
-    for (_, config_dir) in config_dirs {
-        let sessions = discover_sessions_with_worktrees(project_path, config_dir);
-        for s in sessions {
-            if seen_paths.insert(s.file_path.to_string_lossy().to_string()) {
-                all.push(s);
-            }
-        }
-    }
-    all
-}
-
 /// Single project (resolved canonical path) vs multi-project iteration over
 /// all known projects, optionally regex-filtered.
 enum ProjectScope {
     Single(String),
-    Multi(Vec<sessions::ProjectInfo>),
+    Multi(Vec<ProjectInfo>),
 }
 
 /// Decide between single-project and multi-project iteration based on the
@@ -594,7 +601,7 @@ fn select_project_scope(
     project: &Path,
     all_projects: bool,
     project_regexp: &[String],
-    config_dirs: &[(Option<String>, PathBuf)],
+    source: &dyn Source,
 ) -> Result<ProjectScope, String> {
     if !all_projects && project_regexp.is_empty() {
         return Ok(ProjectScope::Single(resolve_project(&project.to_path_buf())));
@@ -606,8 +613,8 @@ fn select_project_scope(
             Err(e) => return Err(format!("invalid project regexp '{}': {}", p, e)),
         }
     }
-    let all_infos = discover_projects(config_dirs);
-    let filtered: Vec<sessions::ProjectInfo> = if compiled.is_empty() {
+    let all_infos = source.discover_projects();
+    let filtered: Vec<ProjectInfo> = if compiled.is_empty() {
         all_infos
     } else {
         all_infos.into_iter()
@@ -622,13 +629,13 @@ fn select_project_scope(
 /// surviving session; outer Vec is length 1 for Single scope.
 fn discover_sessions_for_scope(
     scope: &ProjectScope,
-    config_dirs: &[(Option<String>, PathBuf)],
+    source: &dyn Source,
     since: Option<chrono::DateTime<chrono::Utc>>,
     before: Option<chrono::DateTime<chrono::Utc>>,
     include_subagents: bool,
 ) -> Vec<(Option<String>, Vec<sessions::SessionFile>)> {
     let collect = |project_path: &str| -> Vec<sessions::SessionFile> {
-        let raw = discover_sessions_across_configs(project_path, config_dirs);
+        let raw = source.discover_sessions(project_path);
         let dated = filter_sessions_before(filter_sessions_since(raw, since), before);
         if include_subagents {
             dated
@@ -789,7 +796,27 @@ fn main() {
         ColorWhen::Auto => {}
     }
 
-    let config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
+    // Build the active backend set. `--backend` selects; `auto` (default)
+    // enables every backend that has a usable store.
+    let claude_config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
+    let mut children: Vec<Box<dyn Source>> = Vec::new();
+    if !matches!(cli.backend, BackendSel::Opencode) {
+        children.push(Box::new(backends::claude::ClaudeSource::new(claude_config_dirs.clone())));
+    }
+    if matches!(cli.backend, BackendSel::Auto | BackendSel::Opencode) {
+        let db = cli.opencode_db.clone()
+            .or_else(backends::opencode::OpenCodeSource::default_db_path);
+        match db {
+            Some(db) => children.push(Box::new(backends::opencode::OpenCodeSource::new(db))),
+            None if matches!(cli.backend, BackendSel::Opencode) => {
+                eprintln!("error: --backend opencode selected but no opencode.db found; pass --opencode-db <path>");
+                std::process::exit(2);
+            }
+            None => {}
+        }
+    }
+    let multi = source::MultiSource::new(children);
+    let source: &dyn Source = &multi;
 
     let since: Option<chrono::DateTime<chrono::Utc>> = match cli.after.as_deref() {
         None => None,
@@ -816,6 +843,7 @@ fn main() {
     let Cli {
         command,
         config_dir: _, account: _, color: _, after: _, before: _,
+        backend: _, opencode_db: _,
         project,
         all_projects,
         project_regexp,
@@ -906,7 +934,7 @@ fn main() {
                 context_type_filter,
             };
 
-            let scope = match select_project_scope(&project, all_projects, &project_regexp, &config_dirs) {
+            let scope = match select_project_scope(&project, all_projects, &project_regexp, source) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -923,7 +951,7 @@ fn main() {
             }
 
             // Search always considers subagent files (target-driven); ignore the global flag here.
-            let session_groups = discover_sessions_for_scope(&scope, &config_dirs, since, before, true);
+            let session_groups = discover_sessions_for_scope(&scope, source, since, before, true);
 
             if !is_multi && session_groups.is_empty() {
                 let project_path = match &scope {
@@ -962,7 +990,7 @@ fn main() {
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
                     let wrap_context = !proj_options.context_offsets.is_empty();
                     // JSON output suppresses human hints, so hit_cap is unused here.
-                    let (count, _hit_cap) = search_sessions(&resolved, &proj_options, |m| {
+                    let (count, _hit_cap) = search_sessions(source, &resolved, &proj_options, |m| {
                         emit_json_match(&m, wrap_context);
                     });
                     remaining = remaining.saturating_sub(count);
@@ -981,7 +1009,7 @@ fn main() {
                     };
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
                     // -l mode prints only paths; hit_cap goes unused for now.
-                    let (count, _hit_cap) = search_sessions(&resolved, &proj_options, |m| {
+                    let (count, _hit_cap) = search_sessions(source, &resolved, &proj_options, |m| {
                         let path = resolved.iter()
                             .find(|s| s.session_id == m.session_id)
                             .map(|s| s.file_path.to_string_lossy().to_string())
@@ -1013,7 +1041,7 @@ fn main() {
                     let mut project_lines: Vec<String> = vec![];
                     let mut first_in_proj = true;
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
-                    let (count, hit_cap) = search_sessions(&resolved, &proj_options, |m| {
+                    let (count, hit_cap) = search_sessions(source, &resolved, &proj_options, |m| {
                         if !first_in_proj { project_lines.push(String::new()); }
                         first_in_proj = false;
                         let rendered = if !no_diff && m.edit_diff.is_some() {
@@ -1065,14 +1093,14 @@ fn main() {
             warn_max_results_ignored(max_results_opt, "last");
             let target_set = parse_targets_or_exit(&targets_str);
 
-            let scope = match select_project_scope(&project, all_projects, &project_regexp, &config_dirs) {
+            let scope = match select_project_scope(&project, all_projects, &project_regexp, source) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("error: {}", e);
                     std::process::exit(2);
                 }
             };
-            let session_groups = discover_sessions_for_scope(&scope, &config_dirs, since, before, subagents);
+            let session_groups = discover_sessions_for_scope(&scope, source, since, before, subagents);
 
             let all_sessions: Vec<sessions::SessionFile> = session_groups.into_iter()
                 .flat_map(|(_, s)| s)
@@ -1086,11 +1114,9 @@ fn main() {
             // Collect all content across all sessions
             let mut all_records: Vec<parser::ExtractedContent> = vec![];
             for session in &all_sessions {
-                let contents = parser::extract_content_opts(
-                    &session.file_path,
+                let contents = source.extract_content(
+                    session,
                     &target_set.targets,
-                    &session.session_id,
-                    session.is_subagent,
                     json,
                 );
                 all_records.extend(contents);
@@ -1130,7 +1156,7 @@ fn main() {
 
         Commands::Sessions {} => {
             warn_max_results_ignored(max_results_opt, "sessions");
-            let scope = match select_project_scope(&project, all_projects, &project_regexp, &config_dirs) {
+            let scope = match select_project_scope(&project, all_projects, &project_regexp, source) {
                 Ok(s) => s,
                 Err(e) => {
                     eprintln!("error: {}", e);
@@ -1138,7 +1164,7 @@ fn main() {
                 }
             };
             let is_multi = matches!(scope, ProjectScope::Multi(_));
-            let session_groups = discover_sessions_for_scope(&scope, &config_dirs, since, before, subagents);
+            let session_groups = discover_sessions_for_scope(&scope, source, since, before, subagents);
 
             if session_groups.is_empty() {
                 let label = match &scope {
@@ -1160,6 +1186,7 @@ fn main() {
                                 "filePath": s.file_path.to_string_lossy(),
                                 "mtime": mtime,
                                 "isSubagent": s.is_subagent,
+                                "backend": s.backend,
                             })
                         }).collect();
                         json!({
@@ -1178,6 +1205,7 @@ fn main() {
                             "filePath": s.file_path.to_string_lossy(),
                             "mtime": mtime,
                             "isSubagent": s.is_subagent,
+                            "backend": s.backend,
                         })
                     }).collect();
                     json!(arr)
@@ -1207,14 +1235,20 @@ fn main() {
 
         Commands::Projects { sessions: list_sessions } => {
             warn_max_results_ignored(max_results_opt, "projects");
-            let projects = discover_projects(&config_dirs);
+            let projects = source.discover_projects();
 
             if projects.is_empty() {
-                eprintln!("No projects found under ~/.claude/projects/");
+                eprintln!("No projects found");
                 std::process::exit(1);
             }
 
-            let has_multiple_accounts = config_dirs.iter().any(|(acct, _)| acct.is_some());
+            // Annotate with [backend] only when more than one backend is
+            // present (the common single-backend case stays uncluttered), and
+            // with [account] only for multi-account Claude setups.
+            let backends: HashSet<&str> = projects.iter().map(|p| p.backend).collect();
+            let multi_backend = backends.len() > 1;
+            let accounts: HashSet<Option<&str>> = projects.iter().map(|p| p.account.as_deref()).collect();
+            let multi_account = accounts.len() > 1;
 
             if json {
                 let output: Vec<_> = projects.iter().map(|p| {
@@ -1228,15 +1262,12 @@ fn main() {
                         "sessionCount": p.session_count,
                         "latestMtime": mtime,
                         "account": p.account,
+                        "backend": p.backend,
                     });
                     if list_sessions {
-                        let config_dir = config_dirs.iter()
-                            .find(|(acct, _)| acct == &p.account)
-                            .map(|(_, d)| d.as_path())
-                            .unwrap_or_else(|| config_dirs.first().map(|(_, d)| d.as_path()).unwrap());
                         let sess = filter_sessions_before(
                             filter_sessions_since(
-                                discover_sessions(&p.decoded_path, None, config_dir),
+                                source.discover_sessions(&p.decoded_path),
                                 since,
                             ),
                             before,
@@ -1251,6 +1282,7 @@ fn main() {
                                     "filePath": s.file_path.to_string_lossy(),
                                     "mtime": smtime,
                                     "isSubagent": s.is_subagent,
+                                    "backend": s.backend,
                                 })
                             })
                             .collect();
@@ -1267,28 +1299,26 @@ fn main() {
                             dt.format("%Y-%m-%d %H:%M:%S").to_string()
                         })
                         .unwrap_or_else(|| "no sessions".to_string());
-                    let account_str = if has_multiple_accounts {
+                    let mut tags = String::new();
+                    if multi_backend {
+                        tags.push_str(&format!(" [{}]", p.backend));
+                    }
+                    if multi_account {
                         match &p.account {
-                            Some(a) => format!(" [{}]", a),
-                            None => " [default]".to_string(),
+                            Some(a) => tags.push_str(&format!(" [{}]", a)),
+                            None => tags.push_str(" [default]"),
                         }
-                    } else {
-                        String::new()
-                    };
+                    }
                     println!("{} ({} session{}) {}{}",
                         p.decoded_path,
                         p.session_count,
                         if p.session_count == 1 { "" } else { "s" },
                         ts_str,
-                        account_str);
+                        tags);
                     if list_sessions {
-                        let config_dir = config_dirs.iter()
-                            .find(|(acct, _)| acct == &p.account)
-                            .map(|(_, d)| d.as_path())
-                            .unwrap_or_else(|| config_dirs.first().map(|(_, d)| d.as_path()).unwrap());
                         let sess = filter_sessions_before(
                             filter_sessions_since(
-                                discover_sessions(&p.decoded_path, None, config_dir),
+                                source.discover_sessions(&p.decoded_path),
                                 since,
                             ),
                             before,
@@ -1296,7 +1326,9 @@ fn main() {
                         for s in &sess {
                             if !subagents && s.is_subagent { continue; }
                             let smtime: chrono::DateTime<chrono::Utc> = s.mtime.into();
-                            let suffix = if s.is_subagent { " [subagent]" } else { "" };
+                            let mut suffix = String::new();
+                            if s.is_subagent { suffix.push_str(" [subagent]"); }
+                            if multi_backend { suffix.push_str(&format!(" [{}]", s.backend)); }
                             println!("  {} {}{}", smtime.format("%Y-%m-%d %H:%M:%S"), s.session_id, suffix);
                         }
                     }
@@ -1323,7 +1355,7 @@ fn main() {
 
             let all_sessions = filter_sessions_before(
                 filter_sessions_since(
-                    discover_sessions_across_configs(&project_path, &config_dirs),
+                    source.discover_sessions(&project_path),
                     since,
                 ),
                 before,
@@ -1346,11 +1378,9 @@ fn main() {
                 if !subagents && s.is_subagent {
                     continue;
                 }
-                all_contents.extend(parser::extract_content_opts(
-                    &s.file_path,
+                all_contents.extend(source.extract_content(
+                    s,
                     &target_set.targets,
-                    &s.session_id,
-                    s.is_subagent,
                     json,
                 ));
             }
@@ -1381,7 +1411,7 @@ fn main() {
 
             let all_sessions = filter_sessions_before(
                 filter_sessions_since(
-                    discover_sessions_across_configs(&project_path, &config_dirs),
+                    source.discover_sessions(&project_path),
                     since,
                 ),
                 before,
@@ -1408,11 +1438,9 @@ fn main() {
                 if !subagents && s.is_subagent {
                     continue;
                 }
-                all_contents.extend(parser::extract_content_opts(
-                    &s.file_path,
+                all_contents.extend(source.extract_content(
+                    s,
                     &target_set.targets,
-                    &s.session_id,
-                    s.is_subagent,
                     json,
                 ));
             }
@@ -1426,85 +1454,34 @@ fn main() {
             }
 
             if follow {
-                use std::io::{BufRead, BufReader, Seek, SeekFrom};
-
                 if subagents {
-                    eprintln!("warning: --subagents has no effect with -f; only the main session file is followed");
+                    eprintln!("warning: --subagents has no effect with -f; only the main session is followed");
                 }
 
-                // Follow only the main (non-subagent) session file
+                // Follow only the main (non-subagent) session.
                 let main_session = match sessions.iter().find(|s| !s.is_subagent) {
-                    Some(s) => s,
+                    Some(s) => s.clone(),
                     None => {
-                        eprintln!("error: No main session file to follow");
+                        eprintln!("error: No main session to follow");
                         std::process::exit(2);
                     }
                 };
 
-                let mut file = match std::fs::File::open(&main_session.file_path) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        eprintln!("error: failed to open {}: {}", main_session.file_path.display(), e);
-                        std::process::exit(2);
-                    }
-                };
-
-                // Seek to end — we already printed the initial tail
-                file.seek(SeekFrom::End(0)).unwrap();
-
-                let mut tool_use_map = parser::ToolUseMap::new();
-                let mut reader = BufReader::new(file);
-                let mut line_buf = String::new();
-
-                loop {
-                    line_buf.clear();
-                    match reader.read_line(&mut line_buf) {
-                        Ok(0) => {
-                            // EOF — sleep and retry
-                            std::thread::sleep(std::time::Duration::from_millis(200));
-                            continue;
-                        }
-                        Ok(_) => {
-                            let line = line_buf.trim_end();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            match serde_json::from_str::<serde_json::Value>(line) {
-                                Ok(entry) => {
-                                    parser::collect_tool_use_ids(&entry, &mut tool_use_map);
-                                    let mut results = vec![];
-                                    parser::extract_from_entry(
-                                        &entry,
-                                        &tool_use_map,
-                                        &target_set.targets,
-                                        &main_session.session_id,
-                                        main_session.is_subagent,
-                                        &mut results,
-                                    );
-                                    for content in &results {
-                                        if target_set.matches(&content.target, content.tool_name.as_deref()) {
-                                            print_content(content);
-                                        }
-                                    }
-                                    let _ = std::io::stdout().flush();
-                                }
-                                Err(_) => {
-                                    // Incomplete line (file still being written),
-                                    // put it back by seeking backward
-                                    let n = line_buf.len() as i64;
-                                    let inner = reader.get_mut();
-                                    let _ = inner.seek(SeekFrom::Current(-n));
-                                    // Clear the BufReader's internal buffer so it
-                                    // re-reads from the seeked position
-                                    reader = BufReader::new(reader.into_inner());
-                                    std::thread::sleep(std::time::Duration::from_millis(200));
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            std::thread::sleep(std::time::Duration::from_millis(200));
+                // The backend's follow primitive yields newly-arrived records
+                // (already target-extracted); we apply the subtype selector and
+                // print. Blocking until interrupted (SIGPIPE/SIGINT handled by
+                // the caller's signal setup).
+                let targets_for_follow = target_set.targets.clone();
+                let result = source.follow(&main_session, &targets_for_follow, &mut |records| {
+                    for content in records {
+                        if target_set.matches(&content.target, content.tool_name.as_deref()) {
+                            print_content(content);
                         }
                     }
+                });
+                if let Err(e) = result {
+                    eprintln!("error: follow failed: {}", e);
+                    std::process::exit(2);
                 }
             }
         }
@@ -1522,14 +1499,13 @@ fn main() {
                     DEFAULT_MAX_RESULTS
                 }
             };
-            let paths: Vec<&Path> = config_dirs.iter().map(|(_, d)| d.as_path()).collect();
             let memory_args = MemoryArgs {
                 project: &project,
                 json,
                 max_line_width,
                 max_results,
             };
-            run_memory(subcommand, &paths, &memory_args);
+            run_memory(subcommand, source, &memory_args);
         }
     }
 }
@@ -1541,11 +1517,11 @@ struct MemoryArgs<'a> {
     max_results: usize,
 }
 
-fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path], args: &MemoryArgs) {
+fn run_memory(cmd: MemoryCommands, source: &dyn Source, args: &MemoryArgs) {
     match cmd {
         MemoryCommands::Dump { no_subdirs, files_only } => {
             let cwd = resolve_project_path(args.project);
-            let files = discover_memory_files(&cwd, config_dirs, !no_subdirs);
+            let files = source.discover_memory_files(&cwd, !no_subdirs);
 
             if files.is_empty() {
                 eprintln!("No memory files found for {}", cwd.display());
@@ -1593,7 +1569,7 @@ fn run_memory(cmd: MemoryCommands, config_dirs: &[&Path], args: &MemoryArgs) {
             files_with_matches, ignore_case, fixed_strings, extended_regexp,
         } => {
             let cwd = resolve_project_path(args.project);
-            let files = discover_memory_files(&cwd, config_dirs, !no_subdirs);
+            let files = source.discover_memory_files(&cwd, !no_subdirs);
 
             if files.is_empty() {
                 eprintln!("No memory files found for {}", cwd.display());

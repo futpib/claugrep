@@ -190,8 +190,11 @@ impl TargetSelector {
     pub fn new() -> Self {
         Self::default()
     }
-
     /// Test whether a record passes the selector.
+    ///
+    /// Subtype comparison is case-insensitive so a filter like `tool-use.bash`
+    /// matches a record regardless of whether the backend stamps the tool name
+    /// as `Bash` (Claude) or `bash` (opencode).
     pub fn matches(&self, target: &Target, tool_name: Option<&str>) -> bool {
         if !self.targets.contains(target) {
             return false;
@@ -199,7 +202,7 @@ impl TargetSelector {
         match self.subtype_filters.get(target) {
             None => true,
             Some(allowed) => match tool_name {
-                Some(s) => allowed.contains(s),
+                Some(s) => allowed.contains(&s.to_lowercase()),
                 None => false,
             },
         }
@@ -211,7 +214,8 @@ impl FromIterator<QualifiedTarget> for TargetSelector {
     /// Build a selector from a stream of qualified targets. Bare entries
     /// (`subtype: None`) win over qualified ones (`subtype: Some(_)`) for the
     /// same target — so `[System.away_summary, System]` yields a selector
-    /// with no subtype filter on System.
+    /// with no subtype filter on System. Subtypes are stored lower-cased so
+    /// [`Self::matches`] can do case-insensitive comparison.
     fn from_iter<I: IntoIterator<Item = QualifiedTarget>>(iter: I) -> Self {
         let mut sel = TargetSelector::new();
         let mut bare: HashSet<Target> = HashSet::new();
@@ -229,7 +233,7 @@ impl FromIterator<QualifiedTarget> for TargetSelector {
             if bare.contains(&t) {
                 continue;
             }
-            sel.subtype_filters.entry(t).or_default().insert(s);
+            sel.subtype_filters.entry(t).or_default().insert(s.to_lowercase());
         }
 
         sel

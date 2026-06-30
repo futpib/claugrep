@@ -17,6 +17,7 @@ chrono = "0.4"
 similar = "2"
 console = "0.15"
 libc = "0.2.183"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

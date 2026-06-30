@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use regex::Regex;
 
-use crate::parser::{extract_content_opts, EditDiff, ExtractedContent, Target, TargetSelector};
+use crate::parser::{EditDiff, ExtractedContent, Target, TargetSelector};
 use crate::sessions::SessionFile;
+use crate::source::Source;
 
 pub struct MatchedLine {
     pub line: String,
@@ -197,7 +198,15 @@ fn make_context_record(r: &ExtractedContent, offset: i32, keep_raw: bool) -> Con
 /// because `max_results` was reached (i.e. more matches may exist), false if it
 /// finished naturally. Callers use this to decide whether to print the
 /// "limit reached" hint.
-pub fn search_sessions<F>(sessions: &[SessionFile], options: &SearchOptions, mut on_match: F) -> (usize, bool)
+///
+/// Content extraction is delegated to `source`, so this works uniformly across
+/// backends (Claude JSONL, opencode SQLite, …).
+pub fn search_sessions<F>(
+    source: &dyn Source,
+    sessions: &[SessionFile],
+    options: &SearchOptions,
+    mut on_match: F,
+) -> (usize, bool)
 where
     F: FnMut(SearchMatch),
 {
@@ -210,11 +219,9 @@ where
             break;
         }
 
-        let contents = extract_content_opts(
-            &session.file_path,
+        let contents = source.extract_content(
+            session,
             &options.extract_targets,
-            &session.session_id,
-            session.is_subagent,
             options.json_output,
         );
 

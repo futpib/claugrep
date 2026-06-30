@@ -2,9 +2,9 @@
 
 [![Coverage Status](https://coveralls.io/repos/github/futpib-bot/claugrep/badge.svg?branch=master)](https://coveralls.io/github/futpib-bot/claugrep?branch=master)
 
-Browse, search, and export Claude Code conversation transcripts from the command line.
+Browse, search, and export AI coding-agent conversation transcripts from the command line.
 
-`claugrep` reads the JSONL session files written by [Claude Code](https://claude.ai/code) to `~/.claude/projects/` and lets you grep across them, list sessions, or dump their content as plain text.
+`claugrep` reads transcripts from multiple backends — [Claude Code](https://claude.ai/code)'s per-session `.jsonl` files under `~/.claude/projects/`, [opencode](https://opencode.ai)'s SQLite store at `~/.local/share/opencode/opencode.db`, and any future backend that implements the `Source` trait — and lets you grep across them, list sessions, or dump their content as plain text. By default both are searched (auto-detected); pass `--backend claude` or `--backend opencode` to pick one.
 
 ## Installation
 
@@ -36,14 +36,37 @@ Commands:
   tail      Show the last N records of a session (like tail)
 ```
 
+## Backends
+
+`claugrep` talks to transcript stores through a `Source` trait (`src/source.rs`). Each backend is one self-contained implementation; a `MultiSource` composes them so the rest of the program is unaware more than one store exists. Adding a backend (codex, …) means dropping one module into `src/backends/` and registering it in `main` — nothing else changes.
+
+| Backend | Storage | Selection |
+|---------|---------|-----------|
+| `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | always, unless `--backend opencode` |
+| `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`session`/`message`/`part` tables) | always, unless `--backend claude`; override path with `--opencode-db` |
+
+`auto` (the default) enables every backend whose store is present, so a single `claugrep search` spans both. `projects`/`sessions` listings annotate each row with its `[backend]` when more than one is active (and `[account]` for multi-account Claude).
+
+**Content-type coverage.** The `-t/--targets` filters work uniformly, but backends differ in what they can populate:
+
+- Both populate: `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `compact-summary`.
+- Claude-only (transcript-internal telemetry with no opencode equivalent): `system`, `attachment`, `progress`, `file-history-snapshot`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types. These stay empty for opencode sessions.
+- opencode merges a tool call and its result into one record; claugrep still surfaces them as separate `tool-use`/`tool-result` (and `bash-command`/`bash-output`) records so `-t` filtering is identical across backends.
+- Tool-name subtypes match case-insensitively, so `-t tool-use.bash` finds both Claude's `Bash` and opencode's `bash`. opencode tool names are otherwise passed through verbatim (including MCP/plugin names like `web-search-prime_web_search_prime`).
+- opencode `edit` calls render as unified diffs exactly like Claude's, via the same `EditDiff` path.
+
+`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), opencode walks `AGENTS.md`.
+
 ### Global options
 
 These options are accepted by every subcommand. Subcommands ignore options they don't use.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--backend <which>` | `auto` | Transcript backend(s): `auto` (every backend with data), `claude`, or `opencode` |
+| `--opencode-db <path>` | *XDG data dir* | Path to the opencode SQLite DB (`$XDG_DATA_HOME/opencode/opencode.db`) |
 | `--config-dir <path>` | `~/.claude` | Claude config directory (overrides `CLAUDE_CONFIG_DIR`) |
-| `--account <name>` | | Filter to a specific account (claudex multi-account support) |
+| `--account <name>` | | Filter to a specific Claude account (claudex multi-account support) |
 | `--color <when>` | `auto` | Colorize output: `auto`, `always`, or `never` (also respects `NO_COLOR`) |
 | `--after <date>` / `--since <date>` | | Only show sessions modified after the given date |
 | `--before <date>` / `--until <date>` | | Only show sessions modified before the given date |
@@ -295,6 +318,17 @@ claugrep tail -n 5
 
 # Follow the current session live (like tail -f)
 claugrep tail -f
+
+# ── opencode backend ────────────────────────────────────────────────────────
+
+# Search opencode sessions only (skip the opencode.db auto-detection)
+claugrep --backend opencode search "auth" -t user
+
+# Dump the latest opencode session's bash commands + outputs
+claugrep --backend opencode dump 0 -t bash-command,bash-output
+
+# List every project claugrep can see (both backends, tagged)
+claugrep projects
 ```
 
 ## Development
@@ -311,3 +345,7 @@ cargo test
 ```
 
 Integration tests in `tests/integration.rs` run the binary against real Claude Code session transcripts. They skip gracefully in environments where no transcripts exist.
+
+### Adding a backend
+
+Implement the `Source` trait (`src/source.rs`) — `discover_projects`, `discover_sessions`, `extract_content`, `follow`, and `discover_memory_files` — in a new `src/backends/<name>.rs`, returning the shared `ExtractedContent` / `SessionFile` / `ProjectInfo` types. Register an instance in `main`'s source-construction block (and add it to the `--backend` enum if you want explicit selection). `MultiSource` handles merging and per-session dispatch automatically; no other code needs to change.

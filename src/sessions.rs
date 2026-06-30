@@ -3,6 +3,13 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Backend identifier stored on every `SessionFile` / `ProjectInfo` so the
+/// `MultiSource` composite (and output formatters) can route/dispatch/annotate
+/// records back to the source that produced them. This is a `&'static str`
+/// rather than an enum so new backends (codex, …) can be added without editing
+/// a shared enum — the `Source::name()` impl is the single source of truth.
+pub const CLAUDE: &str = "claude";
+
 /// Read a directory, returning `None` silently for `NotFound` (e.g. cleaned-up worktrees)
 /// and logging a warning for other errors.
 fn try_read_dir(path: &Path) -> Option<fs::ReadDir> {
@@ -22,6 +29,8 @@ pub struct SessionFile {
     pub file_path: PathBuf,
     pub mtime: std::time::SystemTime,
     pub is_subagent: bool,
+    /// Which `Source` produced this session (e.g. `claude`, `opencode`).
+    pub backend: &'static str,
 }
 
 fn encode_project_path(path: &str) -> String {
@@ -95,6 +104,7 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
                 file_path,
                 mtime,
                 is_subagent: true,
+                backend: CLAUDE,
             })
         })
         .collect()
@@ -143,6 +153,7 @@ pub struct ProjectInfo {
     pub session_count: usize,
     pub latest_mtime: Option<std::time::SystemTime>,
     pub account: Option<String>,
+    pub backend: &'static str,
 }
 
 fn try_verify_decoded_path(encoded: &str) -> (String, bool) {
@@ -234,6 +245,7 @@ pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<Proje
                     session_count,
                     latest_mtime,
                     account: account.clone(),
+                    backend: CLAUDE,
                 })
             })
             .collect();
@@ -296,6 +308,7 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, con
                 file_path: path.clone(),
                 mtime: *mtime,
                 is_subagent: false,
+                backend: CLAUDE,
             });
             result.extend(find_subagent_files(&dir, sid));
         }
@@ -313,6 +326,7 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, con
             file_path: path.clone(),
             mtime: *mtime,
             is_subagent: false,
+            backend: CLAUDE,
         });
         result.extend(find_subagent_files(&dir, sid));
     }
@@ -379,6 +393,7 @@ mod tests {
             file_path: std::path::PathBuf::from(format!("/tmp/{}.jsonl", id)),
             mtime: SystemTime::UNIX_EPOCH,
             is_subagent: false,
+            backend: CLAUDE,
         }
     }
 
