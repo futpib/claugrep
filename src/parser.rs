@@ -271,12 +271,31 @@ pub fn collect_tool_use_ids(entry: &serde_json::Value, map: &mut ToolUseMap) {
 
     if let Some(arr) = content.as_array() {
         for block in arr {
-            if block["type"] == "tool_use" {
+            // Client tool_use and server-side server_tool_use both carry an
+            // (id, name) pair; record both so any later tool_result (client or
+            // server) can resolve its tool name.
+            if block["type"] == "tool_use" || block["type"] == "server_tool_use" {
                 if let (Some(id), Some(name)) = (block["id"].as_str(), block["name"].as_str()) {
                     map.insert(id.to_string(), name.to_string());
                 }
             }
         }
+    }
+}
+
+/// Emit an "unrecognized content block" warning at most once per block type per
+/// process, so a novel transcript format doesn't flood stderr on every record.
+fn warn_unrecognized_block(kind: &str, blk_type: &str) {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    let mut guard = SEEN.lock().unwrap();
+    let set = guard.get_or_insert_with(HashSet::new);
+    if set.insert(format!("{}:{}", kind, blk_type)) {
+        eprintln!(
+            "warning: skipping unrecognized {} content block type '{}'",
+            kind, blk_type
+        );
     }
 }
 
@@ -670,9 +689,7 @@ fn extract_user(
                     });
                 }
             }
-            other => {
-                eprintln!("warning: skipping unrecognized user content block type '{}'", other);
-            }
+            other => warn_unrecognized_block("user", other),
         }
     }
 }
@@ -970,10 +987,9 @@ fn extract_assistant(
     for block in content {
         let blk_type = block["type"].as_str().unwrap_or("");
         match blk_type {
-            "text" | "thinking" | "tool_use" => {}
-            other => {
-                eprintln!("warning: skipping unrecognized assistant content block type '{}'", other);
-            }
+            // Known block types (handled below or intentionally skipped).
+            "text" | "thinking" | "tool_use" | "server_tool_use" | "tool_result" | "fallback" => {}
+            other => warn_unrecognized_block("assistant", other),
         }
 
         if block["type"] == "text" && targets.contains(&Target::Assistant) {
@@ -1050,6 +1066,40 @@ fn extract_assistant(
                 });
             }
         }
+
+        // Server-side tool call (e.g. web search / webReader). Surface it as a
+        // ToolUse so `-t tool-use` finds it; the name is the server tool.
+        if block["type"] == "server_tool_use" && targets.contains(&Target::ToolUse) {
+            let name = block["name"].as_str().unwrap_or("").to_string();
+            if !name.is_empty() {
+                out.push(ExtractedContent {
+                    target: Target::ToolUse,
+                    text: format_tool_input(&block["input"]),
+                    tool_name: Some(name),
+                    timestamp: timestamp.to_string(),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+
+        // Result of a server-side tool, returned inline in the assistant turn.
+        // (Client tool_result blocks live in user messages, handled elsewhere.)
+        if block["type"] == "tool_result" && targets.contains(&Target::ToolResult) {
+            if let Some(text) = extract_tool_result_text(block) {
+                out.push(ExtractedContent {
+                    target: Target::ToolResult,
+                    text,
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        // `fallback` blocks (redacted/unsupported content) are skipped silently.
     }
 }
 
@@ -1123,6 +1173,25 @@ mod tests {
         let contents = extract_content(f.path(), &targets, "s", false);
         assert_eq!(contents.len(), 1);
         assert_eq!(contents[0].target, Target::Assistant);
+    }
+
+    #[test]
+    fn test_extract_server_tool_use_and_skip_fallback() {
+        // Assistant turn with a server-side tool call (webReader) and a
+        // `fallback` block. server_tool_use must surface as a ToolUse; fallback
+        // must be skipped without producing a record or a per-record warning.
+        let f = write_jsonl(&[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"searching"},{"type":"server_tool_use","id":"stu1","name":"webReader","input":{"url":"https://x"}},{"type":"tool_result","tool_use_id":"stu1","content":"page body"},{"type":"fallback","from":{"model":"x"}}]},"timestamp":"2024-01-01T00:00:00Z","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        // text + server tool_use + server tool_result (fallback contributes none)
+        assert_eq!(contents.len(), 3, "got: {:?}", contents.iter().map(|c| &c.target).collect::<Vec<_>>());
+        let server = contents.iter().find(|c| c.target == Target::ToolUse
+            && c.tool_name.as_deref() == Some("webReader")).expect("server_tool_use -> ToolUse");
+        assert!(server.text.contains("url"));
+        let res = contents.iter().find(|c| c.target == Target::ToolResult).expect("server tool_result -> ToolResult");
+        assert_eq!(res.text, "page body");
+        assert!(!contents.iter().any(|c| c.text.contains("fallback")), "fallback must not be extracted");
     }
 
     #[test]
