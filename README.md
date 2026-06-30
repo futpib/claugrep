@@ -51,9 +51,14 @@ Commands:
 
 - Both populate: `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `compact-summary`.
 - Claude-only (transcript-internal telemetry with no opencode equivalent): `system`, `attachment`, `progress`, `file-history-snapshot`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types. These stay empty for opencode sessions.
-- opencode merges a tool call and its result into one record; claugrep still surfaces them as separate `tool-use`/`tool-result` (and `bash-command`/`bash-output`) records so `-t` filtering is identical across backends.
-- Tool-name subtypes match case-insensitively, so `-t tool-use.bash` finds both Claude's `Bash` and opencode's `bash`. opencode tool names are otherwise passed through verbatim (including MCP/plugin names like `web-search-prime_web_search_prime`).
 - opencode `edit` calls render as unified diffs exactly like Claude's, via the same `EditDiff` path.
+- Tool-name subtypes match case-insensitively, so `-t tool-use.bash` finds both Claude's `Bash` and opencode's `bash`. opencode tool names are otherwise passed through verbatim (including MCP/plugin names like `web-search-prime_web_search_prime`).
+- opencode merges a tool call and its result into one record, but claugrep surfaces them as up to three separate records (`bash-command` + `tool-use` + `bash-output`) so a default search sees every facet — matching Claude's `tool_use`-block + `tool_result` shape.
+
+**Known asymmetries (inherent to the data, not bugs):**
+- `--json` emits each backend's *native raw record*: Claude's full JSONL line (`type`, `sessionId`, `timestamp`, `message.content[]`, …) vs opencode's `part.data` (`type: text|reasoning|tool|…`). Cross-backend `jq` pipelines must not assume a shared envelope; key off the human-normalized match fields instead.
+- `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not store the compacted summary as searchable prose, so that target can't be fully equivalent.
+- opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 
 `memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), opencode walks `AGENTS.md`.
 

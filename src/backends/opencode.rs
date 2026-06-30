@@ -193,9 +193,9 @@ impl Source for OpenCodeSource {
                 Err(_) => continue,
             };
             let role = role.as_deref().unwrap_or("");
-            let (s0, s1) = part_slots(&data, role, &session.session_id, session.is_subagent, targets, keep_raw, created, updated);
-            if let Some(r) = s0 { out.push(r); }
-            if let Some(r) = s1 { out.push(r); }
+            for (_slot, rec) in part_records(&data, role, &session.session_id, session.is_subagent, targets, keep_raw, created, updated) {
+                out.push(rec);
+            }
         }
         out
     }
@@ -227,43 +227,20 @@ impl Source for OpenCodeSource {
             [&session.session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap_or((0, 0));
-        // rowid → emitted bitmask: bit0 = first slot, bit1 = second slot.
-        let mut emitted: std::collections::HashMap<i64, u8> = std::collections::HashMap::new();
+        // (rowid, slot) pairs already streamed — dedups per facet of a part so a
+        // tool call's input and output each emit exactly once.
+        let mut emitted: std::collections::HashSet<(i64, &'static str)> = std::collections::HashSet::new();
 
         loop {
-            // New parts (rowid advanced) OR parts whose time_updated advanced
-            // (a tool part's output filling in after the call started).
-            let rows = stmt.query_map(
-                rusqlite::params![&session.session_id, last_rowid, last_updated],
-                |row| {
-                    let rowid: i64 = row.get(0)?;
-                    let data_str: String = row.get(1)?;
-                    let created: i64 = row.get(2)?;
-                    let updated: i64 = row.get(3)?;
-                    let role: Option<String> = row.get(4)?;
-                    Ok((rowid, data_str, created, updated, role))
-                },
+            let batch = poll_follow_once(
+                &mut stmt,
+                &session.session_id,
+                session.is_subagent,
+                targets,
+                &mut last_rowid,
+                &mut last_updated,
+                &mut emitted,
             );
-            let rows = match rows { Ok(r) => r, Err(e) => { eprintln!("warning: opencode follow poll failed: {}", e); std::thread::sleep(Duration::from_millis(200)); continue; } };
-
-            let mut batch = vec![];
-            for r in rows.flatten() {
-                let (rowid, data_str, created, updated, role) = r;
-                if rowid > last_rowid { last_rowid = rowid; }
-                if updated > last_updated { last_updated = updated; }
-                let data: serde_json::Value = match serde_json::from_str(&data_str) { Ok(v) => v, Err(_) => continue };
-                let role = role.as_deref().unwrap_or("");
-                let (s0, s1) = part_slots(&data, role, &session.session_id, session.is_subagent, targets, true, created, updated);
-                let mask = emitted.entry(rowid).or_insert(0);
-                if s0.is_some() && (*mask & 1) == 0 {
-                    if let Some(r) = s0 { batch.push(r); }
-                    *mask |= 1;
-                }
-                if s1.is_some() && (*mask & 2) == 0 {
-                    if let Some(r) = s1 { batch.push(r); }
-                    *mask |= 2;
-                }
-            }
             if !batch.is_empty() {
                 on_records(&batch);
                 let _ = std::io::stdout().flush();
@@ -286,16 +263,67 @@ impl Source for OpenCodeSource {
     }
 }
 
-/// Map one opencode part to up to two normalized records (slot 0 / slot 1).
+/// One iteration of the follow poll loop, factored out so it is unit-testable
+/// without the blocking/sleep. Advances `last_rowid` / `last_updated` and the
+/// per-rowid `emitted` bitmask in place, and returns the newly-emitted records
+/// (each slot at most once per rowid).
+fn poll_follow_once(
+    stmt: &mut rusqlite::Statement,
+    session_id: &str,
+    is_subagent: bool,
+    targets: &HashSet<Target>,
+    last_rowid: &mut i64,
+    last_updated: &mut i64,
+    emitted: &mut std::collections::HashSet<(i64, &'static str)>,
+) -> Vec<ExtractedContent> {
+    let rows = stmt.query_map(
+        rusqlite::params![session_id, *last_rowid, *last_updated],
+        |row| {
+            let rowid: i64 = row.get(0)?;
+            let data_str: String = row.get(1)?;
+            let created: i64 = row.get(2)?;
+            let updated: i64 = row.get(3)?;
+            let role: Option<String> = row.get(4)?;
+            Ok((rowid, data_str, created, updated, role))
+        },
+    );
+    let mut batch = vec![];
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => { eprintln!("warning: opencode follow poll failed: {}", e); return batch; }
+    };
+    for r in rows.flatten() {
+        let (rowid, data_str, created, updated, role) = r;
+        if rowid > *last_rowid { *last_rowid = rowid; }
+        if updated > *last_updated { *last_updated = updated; }
+        let data: serde_json::Value = match serde_json::from_str(&data_str) { Ok(v) => v, Err(_) => continue };
+        let role = role.as_deref().unwrap_or("");
+        for (slot, rec) in part_records(&data, role, session_id, is_subagent, targets, true, created, updated) {
+            if emitted.insert((rowid, slot)) {
+                batch.push(rec);
+            }
+        }
+    }
+    batch
+}
+
+/// Map one opencode part to zero or more normalized records, each tagged with a
+/// stable `slot` key (e.g. `"cmd"`, `"use"`, `"out"`).
 ///
-/// Non-tool parts use only slot 0. A tool part uses slot 0 = the call/input and
-/// slot 1 = the result/output, mirroring how Claude emits a `tool_use` and a
-/// later `tool_result` as two separate records — this keeps `-t bash-command`
-/// vs `-t bash-output` filtering identical across backends.
+/// A tool part can yield up to three records — the call as `BashCommand`, the
+/// call as `ToolUse`, and the result as `BashOutput`/`ToolResult` — mirroring
+/// how Claude emits a `tool_use` block (which may produce both a BashCommand and
+/// a ToolUse record) plus a later `tool_result` record. This keeps `-t
+/// bash-command` vs `-t bash-output` vs `-t tool-use` filtering identical across
+/// backends, *and* lets a default search (which requests all of them) see every
+/// facet of the call.
+///
+/// The `slot` keys let the follow loop dedup per-rowid without re-deriving
+/// equality from record contents.
 ///
 /// `targets` is honored (early-filter) the same way the Claude extractor does,
 /// so callers searching a narrow target set don't pay for materializing the rest.
-fn part_slots(
+fn part_records(
     data: &serde_json::Value,
     role: &str,
     session_id: &str,
@@ -304,42 +332,42 @@ fn part_slots(
     keep_raw: bool,
     created_ms: i64,
     updated_ms: i64,
-) -> (Option<ExtractedContent>, Option<ExtractedContent>) {
+) -> Vec<(&'static str, ExtractedContent)> {
     let ptype = data["type"].as_str().unwrap_or("");
     let raw = if keep_raw { Some(data.clone()) } else { None };
+    let mut out: Vec<(&'static str, ExtractedContent)> = vec![];
 
     match ptype {
         "text" => {
             let target = if is_subagent && role != "assistant" {
-                if targets.contains(&Target::SubagentPrompt) { Target::SubagentPrompt } else { return (None, None); }
+                if targets.contains(&Target::SubagentPrompt) { Target::SubagentPrompt } else { return out; }
             } else if role == "assistant" {
-                if targets.contains(&Target::Assistant) { Target::Assistant } else { return (None, None); }
+                if targets.contains(&Target::Assistant) { Target::Assistant } else { return out; }
             } else {
-                if targets.contains(&Target::User) { Target::User } else { return (None, None); }
+                if targets.contains(&Target::User) { Target::User } else { return out; }
             };
-            let text = data["text"].as_str().unwrap_or("").to_string();
-            (Some(ExtractedContent {
+            out.push(("text", ExtractedContent {
                 target,
-                text,
+                text: data["text"].as_str().unwrap_or("").to_string(),
                 tool_name: None,
                 timestamp: millis_to_iso(created_ms),
                 session_id: session_id.to_string(),
                 edit_diff: None,
                 raw_entry: raw,
-            }), None)
+            }));
         }
         "reasoning" => {
-            if !targets.contains(&Target::Thinking) { return (None, None); }
-            let text = data["text"].as_str().unwrap_or("").to_string();
-            (Some(ExtractedContent {
-                target: Target::Thinking,
-                text,
-                tool_name: None,
-                timestamp: millis_to_iso(time_start(data, created_ms)),
-                session_id: session_id.to_string(),
-                edit_diff: None,
-                raw_entry: raw,
-            }), None)
+            if targets.contains(&Target::Thinking) {
+                out.push(("reasoning", ExtractedContent {
+                    target: Target::Thinking,
+                    text: data["text"].as_str().unwrap_or("").to_string(),
+                    tool_name: None,
+                    timestamp: millis_to_iso(time_start(data, created_ms)),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: raw,
+                }));
+            }
         }
         "tool" => {
             let tool = data["tool"].as_str().unwrap_or("").to_string();
@@ -348,80 +376,45 @@ fn part_slots(
             let output_obj = &state["output"];
             let is_bash = tool == "bash";
 
-            // slot 0: the call (BashCommand and/or ToolUse), like Claude's tool_use block.
-            let s0 = {
-                let want_bash_cmd = is_bash && targets.contains(&Target::BashCommand);
-                let want_tool_use = targets.contains(&Target::ToolUse) && !tool.is_empty();
-                if !want_bash_cmd && !want_tool_use {
-                    None
-                } else {
-                    let edit_diff = if tool == "edit" {
-                        match (input["filePath"].as_str(), input["oldString"].as_str(), input["newString"].as_str()) {
-                            (Some(fp), Some(old), Some(new)) => Some(EditDiff {
-                                file_path: fp.to_string(),
-                                old_string: old.to_string(),
-                                new_string: new.to_string(),
-                            }),
-                            _ => None,
-                        }
-                    } else { None };
-
-                    // Emit a BashCommand record when asked; it's the most useful
-                    // view of a bash call. If only ToolUse is wanted, render the
-                    // whole input (command included) as the tool-use text.
-                    let (target, text) = if want_bash_cmd {
-                        (Target::BashCommand, input["command"].as_str().unwrap_or("").to_string())
-                    } else {
-                        (Target::ToolUse, format_tool_input(input))
-                    };
-                    Some(ExtractedContent {
-                        target,
-                        text,
-                        tool_name: Some(tool.clone()),
-                        timestamp: millis_to_iso(time_input_start(state, created_ms)),
-                        session_id: session_id.to_string(),
-                        edit_diff,
-                        raw_entry: raw.clone(),
-                    })
-                }
-            };
-
-            // If both BashCommand and ToolUse are wanted, Claude emits two
-            // records from one tool_use block. For opencode we can't return a
-            // third slot, so when both are wanted we emit the BashCommand in s0
-            // and the ToolUse rendering in s1. This is the one place the
-            // 2-slot model is slightly lossy vs Claude's N-output, but it keeps
-            // both targets populated.
-            let s1 = {
-                let want_both = is_bash
-                    && targets.contains(&Target::BashCommand)
-                    && targets.contains(&Target::ToolUse);
-                if want_both {
-                    Some(ExtractedContent {
-                        target: Target::ToolUse,
-                        text: format_tool_input(input),
-                        tool_name: Some(tool.clone()),
-                        timestamp: millis_to_iso(time_input_start(state, created_ms)),
-                        session_id: session_id.to_string(),
-                        edit_diff: None,
-                        raw_entry: raw.clone(),
-                    })
-                } else {
-                    None
-                }
-            };
-
-            // The tool's result is a separate record too. We've used s0/s1 above
-            // for the call; fold the output into the stream by reusing whichever
-            // slot is free. If both slots are taken (bash with both targets), the
-            // output is dropped — acceptable, since bash output is also reachable
-            // via the BashOutput target which we handle next.
-
-            // Prefer emitting the output as its own target (BashOutput/ToolResult).
+            // The call. For bash, emit BashCommand (the command text) when
+            // wanted; always emit ToolUse (full input rendering) when wanted.
+            // These are distinct slots so both can coexist with the output.
+            if is_bash && targets.contains(&Target::BashCommand) {
+                out.push(("cmd", ExtractedContent {
+                    target: Target::BashCommand,
+                    text: input["command"].as_str().unwrap_or("").to_string(),
+                    tool_name: Some(tool.clone()),
+                    timestamp: millis_to_iso(time_input_start(state, created_ms)),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: raw.clone(),
+                }));
+            }
+            if targets.contains(&Target::ToolUse) && !tool.is_empty() {
+                let edit_diff = if tool == "edit" {
+                    match (input["filePath"].as_str(), input["oldString"].as_str(), input["newString"].as_str()) {
+                        (Some(fp), Some(old), Some(new)) => Some(EditDiff {
+                            file_path: fp.to_string(),
+                            old_string: old.to_string(),
+                            new_string: new.to_string(),
+                        }),
+                        _ => None,
+                    }
+                } else { None };
+                out.push(("use", ExtractedContent {
+                    target: Target::ToolUse,
+                    text: format_tool_input(input),
+                    tool_name: Some(tool.clone()),
+                    timestamp: millis_to_iso(time_input_start(state, created_ms)),
+                    session_id: session_id.to_string(),
+                    edit_diff,
+                    raw_entry: raw.clone(),
+                }));
+            }
+            // The result, as its own target (BashOutput/ToolResult), when present.
             let out_target = if is_bash { Target::BashOutput } else { Target::ToolResult };
-            let want_output = targets.contains(&out_target) && output_obj.as_str().map(|s| !s.is_empty()).unwrap_or(false);
-            let output_record = if want_output {
-                Some(ExtractedContent {
+            if targets.contains(&out_target) && output_obj.as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                out.push(("out", ExtractedContent {
                     target: out_target,
                     text: output_obj.as_str().unwrap_or("").to_string(),
                     tool_name: Some(tool.clone()),
@@ -429,40 +422,33 @@ fn part_slots(
                     session_id: session_id.to_string(),
                     edit_diff: None,
                     raw_entry: raw.clone(),
-                })
-            } else { None };
-
-            // Place the output into a free slot if possible; otherwise drop it
-            // (callers wanting tool results should not also request both bash
-            // command+tool-use on the same call).
-            match (s0, s1, output_record) {
-                (a, None, Some(o)) => (a, Some(o)),
-                (None, b, Some(o)) => (Some(o), b),
-                (a, b, _) => (a, b),
+                }));
             }
         }
         "compaction" => {
-            if !targets.contains(&Target::CompactSummary) { return (None, None); }
-            let tail = data["tail_start_id"].as_str().unwrap_or("");
-            let text = if tail.is_empty() {
-                "(compaction boundary)".to_string()
-            } else {
-                format!("(compaction boundary; resumes at {})", tail)
-            };
-            (Some(ExtractedContent {
-                target: Target::CompactSummary,
-                text,
-                tool_name: None,
-                timestamp: millis_to_iso(created_ms),
-                session_id: session_id.to_string(),
-                edit_diff: None,
-                raw_entry: raw,
-            }), None)
+            if targets.contains(&Target::CompactSummary) {
+                let tail = data["tail_start_id"].as_str().unwrap_or("");
+                let text = if tail.is_empty() {
+                    "(compaction boundary)".to_string()
+                } else {
+                    format!("(compaction boundary; resumes at {})", tail)
+                };
+                out.push(("compaction", ExtractedContent {
+                    target: Target::CompactSummary,
+                    text,
+                    tool_name: None,
+                    timestamp: millis_to_iso(created_ms),
+                    session_id: session_id.to_string(),
+                    edit_diff: None,
+                    raw_entry: raw,
+                }));
+            }
         }
         // step-start / step-finish / patch are step-boundary / snapshot markers
         // with no searchable prose; skip them.
-        _ => (None, None),
+        _ => {}
     }
+    out
 }
 
 fn time_start(data: &serde_json::Value, fallback: i64) -> i64 {
@@ -507,5 +493,274 @@ fn millis_to_systime(ms: i64) -> SystemTime {
         UNIX_EPOCH + Duration::from_millis(ms as u64)
     } else {
         UNIX_EPOCH
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Build an opencode-shaped SQLite DB in a temp file and hand back a source
+    /// plus the live connection (so tests can INSERT mid-scenario for follow).
+    /// Minimal schema: only the columns the queries touch.
+    struct Harness {
+        src: OpenCodeSource,
+        conn: Connection,
+    }
+
+    fn harness() -> Harness {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.into_temp_path().keep().unwrap();
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT,
+                directory TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL);
+             CREATE TABLE part (
+                id TEXT PRIMARY KEY, message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+             CREATE INDEX part_session_idx ON part(session_id);",
+        ).unwrap();
+        Harness { src: OpenCodeSource::new(path), conn }
+    }
+
+    fn add_session(h: &Harness, id: &str, dir: &str, is_sub: bool, ts: i64) {
+        h.conn.execute(
+            "INSERT INTO session(id, project_id, parent_id, directory, time_created, time_updated) \
+             VALUES (?1,'proj',?2,?3,?4,?4)",
+            rusqlite::params![id, if is_sub { Some("ses_parent") } else { None }, dir, ts],
+        ).unwrap();
+    }
+
+    fn add_message(h: &Harness, id: &str, sid: &str, role: &str, ts: i64) {
+        let data = serde_json::json!({ "role": role }).to_string();
+        h.conn.execute(
+            "INSERT INTO message(id, session_id, time_created, time_updated, data) \
+             VALUES (?1,?2,?3,?3,?4)",
+            rusqlite::params![id, sid, ts, data],
+        ).unwrap();
+    }
+
+    /// Insert a part; `data` is the part.data JSON. Returns the new rowid.
+    fn add_part(h: &Harness, id: &str, sid: &str, msg: &str, data: serde_json::Value, created: i64, updated: i64) -> i64 {
+        h.conn.execute(
+            "INSERT INTO part(id, message_id, session_id, time_created, time_updated, data) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            rusqlite::params![id, msg, sid, created, updated, data.to_string()],
+        ).unwrap();
+        h.conn.query_row("SELECT rowid FROM part WHERE id=?1", [id], |r| r.get::<_, i64>(0)).unwrap()
+    }
+
+    fn all_targets() -> HashSet<Target> {
+        [
+            Target::User, Target::Assistant, Target::Thinking, Target::BashCommand,
+            Target::BashOutput, Target::ToolUse, Target::ToolResult,
+            Target::SubagentPrompt, Target::CompactSummary,
+        ].into_iter().collect()
+    }
+
+    #[test]
+    fn discover_sessions_and_projects() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 2000);
+        add_session(&h, "ses_b", "/proj", true, 1500);
+        add_session(&h, "ses_c", "/other", false, 3000);
+
+        let s = h.src.discover_sessions("/proj");
+        // Both top-level + subagent returned; newest first.
+        let ids: Vec<&str> = s.iter().map(|x| x.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["ses_a", "ses_b"]);
+        assert!(s.iter().find(|x| x.session_id == "ses_b").unwrap().is_subagent);
+        assert_eq!(s.iter().find(|x| x.session_id == "ses_a").unwrap().backend, OPENCODE);
+
+        let p = h.src.discover_projects();
+        assert_eq!(p.len(), 2);
+        assert!(p.iter().any(|x| x.decoded_path == "/proj" && x.session_count == 2));
+    }
+
+    #[test]
+    fn extract_core_targets_and_roles() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_u", "ses_a", "user", 1100);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+        add_part(&h, "p1", "ses_a", "msg_u", serde_json::json!({"type":"text","text":"hello user"}), 1100, 1100);
+        add_part(&h, "p2", "ses_a", "msg_as", serde_json::json!({"type":"text","text":"hi back"}), 1200, 1200);
+        add_part(&h, "p3", "ses_a", "msg_as", serde_json::json!({"type":"reasoning","text":"pondering"}), 1250, 1250);
+
+        let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let c = h.src.extract_content(&sess, &all_targets(), false);
+        let targets: Vec<&Target> = c.iter().map(|x| &x.target).collect();
+        assert!(targets.contains(&&Target::User), "missing user: {:?}", targets);
+        assert!(targets.contains(&&Target::Assistant), "missing assistant");
+        assert!(targets.contains(&&Target::Thinking), "missing thinking");
+        assert_eq!(c.iter().find(|x| x.target == Target::User).unwrap().text, "hello user");
+    }
+
+    #[test]
+    fn extract_bash_splits_command_and_output() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+        let tool = serde_json::json!({
+            "type":"tool","tool":"bash","callID":"c1",
+            "state":{"status":"completed",
+                     "input":{"command":"ls -la","description":"list"},
+                     "output":"file1\nfile2",
+                     "time":{"start":1200,"end":1210}}
+        });
+        add_part(&h, "p1", "ses_a", "msg_as", tool, 1200, 1210);
+
+        let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let c = h.src.extract_content(&sess, &all_targets(), false);
+        let cmd = c.iter().find(|x| x.target == Target::BashCommand).expect("bash-command record");
+        assert_eq!(cmd.text, "ls -la");
+        let out = c.iter().find(|x| x.target == Target::BashOutput).expect("bash-output record");
+        assert_eq!(out.text, "file1\nfile2");
+        // input timestamp precedes output timestamp
+        assert!(cmd.timestamp <= out.timestamp, "input ts {} not <= output ts {}", cmd.timestamp, out.timestamp);
+    }
+
+    #[test]
+    fn extract_edit_populates_diff() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+        let edit = serde_json::json!({
+            "type":"tool","tool":"edit","callID":"c1",
+            "state":{"status":"completed",
+                     "input":{"filePath":"/x.rs","oldString":"fn old(){}","newString":"fn new(){}"},
+                     "output":"done"}
+        });
+        add_part(&h, "p1", "ses_a", "msg_as", edit, 1200, 1210);
+
+        let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let c = h.src.extract_content(&sess, &all_targets(), false);
+        let tu = c.iter().find(|x| x.target == Target::ToolUse && x.tool_name.as_deref() == Some("edit"))
+            .expect("tool-use.edit record");
+        let diff = tu.edit_diff.as_ref().expect("edit_diff populated");
+        assert_eq!(diff.file_path, "/x.rs");
+        assert_eq!(diff.old_string, "fn old(){}");
+        assert_eq!(diff.new_string, "fn new(){}");
+    }
+
+    #[test]
+    fn subagent_user_text_maps_to_subagent_prompt() {
+        let h = harness();
+        add_session(&h, "ses_parent", "/proj", false, 1000);
+        add_session(&h, "ses_sub", "/proj", true, 1100);
+        add_message(&h, "msg_u", "ses_sub", "user", 1200);
+        add_part(&h, "p1", "ses_sub", "msg_u", serde_json::json!({"type":"text","text":"do the thing"}), 1200, 1200);
+
+        let sub = h.src.discover_sessions("/proj").into_iter()
+            .find(|s| s.session_id == "ses_sub").unwrap();
+        assert!(sub.is_subagent);
+        let c = h.src.extract_content(&sub, &all_targets(), false);
+        let sp = c.iter().find(|x| x.target == Target::SubagentPrompt).expect("subagent-prompt");
+        assert_eq!(sp.text, "do the thing");
+        // A subagent's user text must NOT also surface as User.
+        assert!(c.iter().all(|x| x.target != Target::User), "subagent text leaked into User target");
+    }
+
+    #[test]
+    fn compaction_surfaces_as_compact_summary() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_u", "ses_a", "user", 1200);
+        add_part(&h, "p1", "ses_a", "msg_u",
+                 serde_json::json!({"type":"compaction","auto":false,"tail_start_id":"msg_xyz"}), 1200, 1200);
+
+        let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let c = h.src.extract_content(&sess, &all_targets(), false);
+        assert!(c.iter().any(|x| x.target == Target::CompactSummary), "compaction not surfaced");
+    }
+
+    #[test]
+    fn follow_streams_new_part_once() {
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+        add_part(&h, "p1", "ses_a", "msg_as", serde_json::json!({"type":"text","text":"old"}), 1200, 1200);
+
+        let _sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let conn = h.src.open().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.rowid, p.data, p.time_created, p.time_updated, json_extract(m.data,'$.role') \
+             FROM part p LEFT JOIN message m ON m.id=p.message_id \
+             WHERE p.session_id=?1 AND (p.rowid>?2 OR p.time_updated>?3) ORDER BY p.rowid",
+        ).unwrap();
+        // Seed at current end (caller already tailed the initial records).
+        let (mut last_rowid, mut last_updated) = conn.query_row(
+            "SELECT COALESCE(MAX(rowid),0), COALESCE(MAX(time_updated),0) FROM part WHERE session_id='ses_a'",
+            [], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,i64>(1)?)),
+        ).unwrap();
+        let mut emitted: std::collections::HashSet<(i64, &'static str)> = Default::default();
+        let mut targets = HashSet::new();
+        targets.insert(Target::Assistant);
+
+        // First poll after seeding: nothing new.
+        let batch = poll_follow_once(&mut stmt, "ses_a", false, &targets, &mut last_rowid, &mut last_updated, &mut emitted);
+        assert!(batch.is_empty(), "seeded follow should not replay history");
+
+        // Insert a NEW part (the live agent producing output).
+        add_part(&h, "p2", "ses_a", "msg_as", serde_json::json!({"type":"text","text":"fresh line"}), 1300, 1300);
+
+        // Second poll: the new record streams exactly once.
+        let batch = poll_follow_once(&mut stmt, "ses_a", false, &targets, &mut last_rowid, &mut last_updated, &mut emitted);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].text, "fresh line");
+        // Third poll: not re-emitted (idempotent).
+        let batch = poll_follow_once(&mut stmt, "ses_a", false, &targets, &mut last_rowid, &mut last_updated, &mut emitted);
+        assert!(batch.is_empty(), "already-emitted slot must not repeat");
+    }
+
+    #[test]
+    fn follow_streams_tool_output_when_it_fills_in() {
+        // A tool call starts (no output yet) then completes (output fills in).
+        // The command slot streams on arrival; the output slot streams later,
+        // once the part's time_updated advances — without re-emitting the command.
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+
+        let conn = h.src.open().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT p.rowid, p.data, p.time_created, p.time_updated, json_extract(m.data,'$.role') \
+             FROM part p LEFT JOIN message m ON m.id=p.message_id \
+             WHERE p.session_id=?1 AND (p.rowid>?2 OR p.time_updated>?3) ORDER BY p.rowid",
+        ).unwrap();
+        // Seed at the (empty) end of the session, as a real follow would.
+        let (mut last_rowid, mut last_updated) = (0i64, 0i64);
+        let mut emitted: std::collections::HashSet<(i64, &'static str)> = Default::default();
+        let mut targets = HashSet::new();
+        targets.insert(Target::BashCommand);
+        targets.insert(Target::BashOutput);
+
+        // Tool call starts: command present, output empty.
+        add_part(&h, "p1", "ses_a", "msg_as",
+            serde_json::json!({"type":"tool","tool":"bash","state":{"status":"running","input":{"command":"ls"},"output":""}}),
+            1200, 1200);
+
+        // First poll: only the command slot streams (output empty → no out slot).
+        let batch = poll_follow_once(&mut stmt, "ses_a", false, &targets, &mut last_rowid, &mut last_updated, &mut emitted);
+        assert!(batch.iter().any(|r| r.target == Target::BashCommand), "command should stream");
+        assert!(!batch.iter().any(|r| r.target == Target::BashOutput), "no output yet");
+
+        // The tool completes: output fills in, time_updated advances.
+        let new_output = serde_json::json!({"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"file1"}});
+        h.conn.execute("UPDATE part SET data=?1, time_updated=1250 WHERE id='p1'",
+                       rusqlite::params![new_output.to_string()]).unwrap();
+
+        // Second poll: the output slot streams; the command slot does NOT repeat.
+        let batch = poll_follow_once(&mut stmt, "ses_a", false, &targets, &mut last_rowid, &mut last_updated, &mut emitted);
+        assert!(batch.iter().any(|r| r.target == Target::BashOutput), "output should stream once filled");
+        assert!(!batch.iter().any(|r| r.target == Target::BashCommand), "command must not re-emit");
     }
 }
