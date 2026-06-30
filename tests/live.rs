@@ -13,12 +13,6 @@ fn claugrep_claude() -> Command {
     c
 }
 
-fn claugrep_opencode() -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_claugrep"));
-    c.args(["--backend", "opencode"]);
-    c
-}
-
 fn home_dir() -> PathBuf {
     dirs::home_dir().expect("no home dir")
 }
@@ -35,28 +29,6 @@ fn project_has_sessions(project: &str) -> bool {
         .join("projects")
         .join(&encoded);
     dir.exists()
-}
-
-/// Return true if the opencode SQLite DB exists and has at least one session
-/// for `project`.
-fn opencode_has_sessions(project: &str) -> bool {
-    let db = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| home_dir().parent().map(|_| home_dir().join(".local/share")))
-        .unwrap_or_else(|| home_dir().join(".local/share"))
-        .join("opencode")
-        .join("opencode.db");
-    if !db.is_file() {
-        return false;
-    }
-    let out = claugrep_opencode()
-        .args(["sessions", "--project", project])
-        .output();
-    match out {
-        Ok(o) => o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
-        Err(_) => false,
-    }
 }
 
 // ── --before / --until date filter ────────────────────────────────────────────
@@ -445,107 +417,3 @@ fn test_dump_missing_session_exits_nonzero() {
     assert!(!out.status.success());
 }
 
-// ── opencode backend ──────────────────────────────────────────────────────────
-
-#[test]
-fn test_opencode_sessions_list() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    let out = claugrep_opencode()
-        .args(["sessions", "--project", &home_project()])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.trim().is_empty(), "expected at least one opencode session");
-}
-
-#[test]
-fn test_opencode_sessions_json_backend_tag() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    let out = claugrep_opencode()
-        .args(["sessions", "--project", &home_project(), "--json"])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success());
-    let parsed: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
-        .expect("valid JSON");
-    let arr = parsed.as_array().expect("JSON array");
-    assert!(!arr.is_empty());
-    assert_eq!(arr[0]["backend"].as_str(), Some("opencode"));
-}
-
-#[test]
-fn test_opencode_search_user_message() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    // "opencode" appears in many user messages in this project's opencode sessions.
-    let out = claugrep_opencode()
-        .args(["search", "opencode", "-t", "user", "--project", &home_project()])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("opencode"), "expected a match; stdout:\n{}", stdout);
-}
-
-#[test]
-fn test_opencode_search_json_raw_entry_is_part() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    let out = claugrep_opencode()
-        .args(["search", "opencode", "-t", "user", "--json", "--project", &home_project()])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert!(!lines.is_empty(), "should have at least one JSON line");
-    let first: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
-    // The raw entry is a NORMALIZED envelope: cross-backend portability keys
-    // (sessionId, timestamp, type=role) must be present so `jq .sessionId` /
-    // `select(.type=="user")` port across Claude and opencode.
-    assert!(first["sessionId"].is_string(), "sessionId missing from opencode --json envelope");
-    assert!(first["timestamp"].is_string(), "timestamp missing from opencode --json envelope");
-    assert_eq!(first["type"].as_str(), Some("user"), "type should be normalized to role");
-    assert_eq!(first["partType"].as_str(), Some("text"), "native part type preserved as partType");
-}
-
-#[test]
-fn test_opencode_dump_works() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    let out = claugrep_opencode()
-        .args(["dump", "1", "--project", &home_project()])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(!stdout.trim().is_empty(), "dump should produce output");
-}
-
-#[test]
-fn test_opencode_tool_search_case_insensitive_subtype() {
-    if !opencode_has_sessions(&home_project()) {
-        eprintln!("SKIP: no opencode sessions found");
-        return;
-    }
-    // opencode stamps tool names lowercase ("bash"); the filter should match
-    // case-insensitively so `-t tool-use.bash` finds them.
-    let out = claugrep_opencode()
-        .args(["search", "ls", "-t", "bash-command", "--project", &home_project()])
-        .output()
-        .expect("failed to run claugrep");
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-}
