@@ -334,7 +334,32 @@ fn part_records(
     updated_ms: i64,
 ) -> Vec<(&'static str, ExtractedContent)> {
     let ptype = data["type"].as_str().unwrap_or("");
-    let raw = if keep_raw { Some(data.clone()) } else { None };
+
+    // For `--json`, emit a NORMALIZED envelope (not the bare part) so the
+    // cross-backend keys consumers reach for actually exist: `sessionId`,
+    // `timestamp`, `type` (normalized to the message role, matching Claude's
+    // record-level `type`), plus `partType` (the native opencode part type) and
+    // `slot` (which facet of the part this record is). All native part fields
+    // stay at top level, so nothing is lost. Deep content structure
+    // (`message.content[]` vs flat part fields) remains backend-native — that
+    // difference is irreducible — but the envelope ports.
+    let base: Option<serde_json::Value> = if keep_raw {
+        let mut env = data.clone();
+        env["sessionId"] = serde_json::Value::String(session_id.to_string());
+        env["role"] = serde_json::Value::String(role.to_string());
+        env["partType"] = serde_json::Value::String(ptype.to_string());
+        env["type"] = serde_json::Value::String(role.to_string());
+        Some(env)
+    } else { None };
+    let finalize = |slot: &'static str, ts_iso: &str| -> Option<serde_json::Value> {
+        base.as_ref().map(|b| {
+            let mut v = b.clone();
+            v["timestamp"] = serde_json::Value::String(ts_iso.to_string());
+            v["slot"] = serde_json::Value::String(slot.to_string());
+            v
+        })
+    };
+
     let mut out: Vec<(&'static str, ExtractedContent)> = vec![];
 
     match ptype {
@@ -346,26 +371,28 @@ fn part_records(
             } else {
                 if targets.contains(&Target::User) { Target::User } else { return out; }
             };
+            let ts = millis_to_iso(created_ms);
             out.push(("text", ExtractedContent {
                 target,
                 text: data["text"].as_str().unwrap_or("").to_string(),
                 tool_name: None,
-                timestamp: millis_to_iso(created_ms),
+                timestamp: ts.clone(),
                 session_id: session_id.to_string(),
                 edit_diff: None,
-                raw_entry: raw,
+                raw_entry: finalize("text", &ts),
             }));
         }
         "reasoning" => {
             if targets.contains(&Target::Thinking) {
+                let ts = millis_to_iso(time_start(data, created_ms));
                 out.push(("reasoning", ExtractedContent {
                     target: Target::Thinking,
                     text: data["text"].as_str().unwrap_or("").to_string(),
                     tool_name: None,
-                    timestamp: millis_to_iso(time_start(data, created_ms)),
+                    timestamp: ts.clone(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
-                    raw_entry: raw,
+                    raw_entry: finalize("reasoning", &ts),
                 }));
             }
         }
@@ -378,16 +405,17 @@ fn part_records(
 
             // The call. For bash, emit BashCommand (the command text) when
             // wanted; always emit ToolUse (full input rendering) when wanted.
-            // These are distinct slots so both can coexist with the output.
+            // Distinct slots so both can coexist with the output.
             if is_bash && targets.contains(&Target::BashCommand) {
+                let ts = millis_to_iso(time_input_start(state, created_ms));
                 out.push(("cmd", ExtractedContent {
                     target: Target::BashCommand,
                     text: input["command"].as_str().unwrap_or("").to_string(),
                     tool_name: Some(tool.clone()),
-                    timestamp: millis_to_iso(time_input_start(state, created_ms)),
+                    timestamp: ts.clone(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
-                    raw_entry: raw.clone(),
+                    raw_entry: finalize("cmd", &ts),
                 }));
             }
             if targets.contains(&Target::ToolUse) && !tool.is_empty() {
@@ -401,27 +429,29 @@ fn part_records(
                         _ => None,
                     }
                 } else { None };
+                let ts = millis_to_iso(time_input_start(state, created_ms));
                 out.push(("use", ExtractedContent {
                     target: Target::ToolUse,
                     text: format_tool_input(input),
                     tool_name: Some(tool.clone()),
-                    timestamp: millis_to_iso(time_input_start(state, created_ms)),
+                    timestamp: ts.clone(),
                     session_id: session_id.to_string(),
                     edit_diff,
-                    raw_entry: raw.clone(),
+                    raw_entry: finalize("use", &ts),
                 }));
             }
             // The result, as its own target (BashOutput/ToolResult), when present.
             let out_target = if is_bash { Target::BashOutput } else { Target::ToolResult };
             if targets.contains(&out_target) && output_obj.as_str().map(|s| !s.is_empty()).unwrap_or(false) {
+                let ts = millis_to_iso(time_output_end(state, updated_ms));
                 out.push(("out", ExtractedContent {
                     target: out_target,
                     text: output_obj.as_str().unwrap_or("").to_string(),
                     tool_name: Some(tool.clone()),
-                    timestamp: millis_to_iso(time_output_end(state, updated_ms)),
+                    timestamp: ts.clone(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
-                    raw_entry: raw.clone(),
+                    raw_entry: finalize("out", &ts),
                 }));
             }
         }
@@ -433,14 +463,15 @@ fn part_records(
                 } else {
                     format!("(compaction boundary; resumes at {})", tail)
                 };
+                let ts = millis_to_iso(created_ms);
                 out.push(("compaction", ExtractedContent {
                     target: Target::CompactSummary,
                     text,
                     tool_name: None,
-                    timestamp: millis_to_iso(created_ms),
+                    timestamp: ts.clone(),
                     session_id: session_id.to_string(),
                     edit_diff: None,
-                    raw_entry: raw,
+                    raw_entry: finalize("compaction", &ts),
                 }));
             }
         }
@@ -680,6 +711,44 @@ mod tests {
         let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
         let c = h.src.extract_content(&sess, &all_targets(), false);
         assert!(c.iter().any(|x| x.target == Target::CompactSummary), "compaction not surfaced");
+    }
+
+    #[test]
+    fn json_envelope_is_cross_backend_portable() {
+        // `--json` raw entries must carry the cross-backend envelope keys
+        // (sessionId, timestamp, type=role, partType, slot) so `jq .sessionId`
+        // and `select(.type=="user")` port to Claude.
+        let h = harness();
+        add_session(&h, "ses_a", "/proj", false, 1000);
+        add_message(&h, "msg_u", "ses_a", "user", 1100);
+        add_message(&h, "msg_as", "ses_a", "assistant", 1200);
+        add_part(&h, "p1", "ses_a", "msg_u", serde_json::json!({"type":"text","text":"hi"}), 1100, 1100);
+        add_part(&h, "p2", "ses_a", "msg_as",
+                 serde_json::json!({"type":"tool","tool":"bash","state":{"status":"completed","input":{"command":"ls"},"output":"f1"}}),
+                 1200, 1210);
+
+        let sess = h.src.discover_sessions("/proj").into_iter().next().unwrap();
+        let c = h.src.extract_content(&sess, &all_targets(), true);
+
+        let user_rec = c.iter().find(|x| x.target == Target::User).unwrap();
+        let raw = user_rec.raw_entry.as_ref().unwrap();
+        assert_eq!(raw["sessionId"], "ses_a");
+        assert_eq!(raw["type"], "user", "type normalized to role");
+        assert_eq!(raw["partType"], "text", "native part type preserved");
+        assert_eq!(raw["role"], "user");
+        assert!(raw["timestamp"].is_string());
+        assert_eq!(raw["slot"], "text");
+        assert_eq!(raw["text"], "hi", "native field preserved at top level");
+
+        // Tool part yields cmd/use/out slots; each envelope carries its own slot+ts.
+        let cmd = c.iter().find(|x| x.target == Target::BashCommand).unwrap();
+        let out = c.iter().find(|x| x.target == Target::BashOutput).unwrap();
+        assert_eq!(cmd.raw_entry.as_ref().unwrap()["slot"], "cmd");
+        assert_eq!(out.raw_entry.as_ref().unwrap()["slot"], "out");
+        assert_eq!(cmd.raw_entry.as_ref().unwrap()["type"], "assistant");
+        assert_eq!(out.raw_entry.as_ref().unwrap()["partType"], "tool");
+        // input (cmd) precedes output (out) in time.
+        assert!(cmd.timestamp <= out.timestamp);
     }
 
     #[test]

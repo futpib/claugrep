@@ -511,11 +511,13 @@ fn test_opencode_search_json_raw_entry_is_part() {
     let lines: Vec<&str> = stdout.lines().collect();
     assert!(!lines.is_empty(), "should have at least one JSON line");
     let first: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
-    // opencode raw entries are part rows: type ∈ {text, reasoning, tool, …}
-    assert!(first["type"].is_string(), "raw part should have a type field");
-    let known = ["text", "reasoning", "tool", "compaction", "step-start", "step-finish", "patch"];
-    assert!(known.contains(&first["type"].as_str().unwrap_or("")),
-        "unexpected part type: {:?}", first["type"]);
+    // The raw entry is a NORMALIZED envelope: cross-backend portability keys
+    // (sessionId, timestamp, type=role) must be present so `jq .sessionId` /
+    // `select(.type=="user")` port across Claude and opencode.
+    assert!(first["sessionId"].is_string(), "sessionId missing from opencode --json envelope");
+    assert!(first["timestamp"].is_string(), "timestamp missing from opencode --json envelope");
+    assert_eq!(first["type"].as_str(), Some("user"), "type should be normalized to role");
+    assert_eq!(first["partType"].as_str(), Some("text"), "native part type preserved as partType");
 }
 
 #[test]

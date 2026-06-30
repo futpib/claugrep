@@ -56,8 +56,8 @@ Commands:
 - opencode merges a tool call and its result into one record, but claugrep surfaces them as up to three separate records (`bash-command` + `tool-use` + `bash-output`) so a default search sees every facet — matching Claude's `tool_use`-block + `tool_result` shape.
 
 **Known asymmetries (inherent to the data, not bugs):**
-- `--json` emits each backend's *native raw record*: Claude's full JSONL line (`type`, `sessionId`, `timestamp`, `message.content[]`, …) vs opencode's `part.data` (`type: text|reasoning|tool|…`). Cross-backend `jq` pipelines must not assume a shared envelope; key off the human-normalized match fields instead.
-- `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not store the compacted summary as searchable prose, so that target can't be fully equivalent.
+- `--json` raw records carry a **normalized envelope** so the cross-backend keys port: `sessionId`, `timestamp`, `type` (the message role — `user`/`assistant`, matching Claude's record-level `type`), plus opencode's `partType` (`text`/`tool`/`reasoning`/…) and `slot` (`cmd`/`use`/`out`/…). So `jq .sessionId` and `select(.type=="user")` work identically on both backends. The *deep content* structure still differs (Claude's `message.content[]` block array vs opencode's flat part fields) — that difference is irreducible; reach for the human-normalized fields (`text`, `tool`) for portable content access.
+- `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not persist the generated compaction summary as searchable prose (verified: `session_context_epoch.baseline` is empty and no summary part is stored near the boundary), so that target can't be fully equivalent. The boundary marker is the best available.
 - opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 
 `memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), opencode walks `AGENTS.md`.
