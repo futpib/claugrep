@@ -114,6 +114,31 @@ fn find_subagent_files(project_dir: &Path, session_id: &str) -> Vec<SessionFile>
 /// if it is not a git repo or has no worktrees.
 pub fn get_worktree_paths(cwd: &str) -> Vec<String> {
     use std::process::Command;
+    // Only expand worktrees when `cwd` is itself the root of a git worktree.
+    // Running git from a *subdirectory* of a repo resolves the enclosing repo,
+    // so `worktree list` would return an ancestor's worktree roots — paths
+    // unrelated to `cwd`. Unioning their sessions would wrongly pull a parent
+    // project's history into this one (e.g. `/home/claude/code` inheriting all
+    // of `/home/claude`'s sessions). Guard by requiring the repo toplevel to be
+    // `cwd` itself before trusting `worktree list`.
+    let toplevel = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output();
+    match toplevel {
+        Ok(out) if out.status.success() => {
+            let top = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let same = match (std::fs::canonicalize(cwd), std::fs::canonicalize(&top)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => top == cwd,
+            };
+            if !same {
+                return vec![cwd.to_string()];
+            }
+        }
+        // Not a git repo (or git unavailable): treat as a lone directory.
+        _ => return vec![cwd.to_string()],
+    }
     let output = Command::new("git")
         .args(["worktree", "list", "--porcelain"])
         .current_dir(cwd)
@@ -477,6 +502,31 @@ mod tests {
         for p in &paths {
             assert!(p.starts_with('/'), "expected absolute path, got: {}", p);
         }
+    }
+
+    #[test]
+    fn test_get_worktree_paths_subdir_of_repo() {
+        // A subdirectory of a git repo must NOT inherit the enclosing repo's
+        // worktree roots — otherwise its sessions would be conflated with the
+        // parent project's. It should return only itself.
+        use std::process::Command;
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let sub = repo.join("subdir");
+        std::fs::create_dir_all(&sub).unwrap();
+        let ok = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return; // git unavailable; nothing to assert
+        }
+        // canonicalize to match get_worktree_paths' comparison basis
+        let sub_canon = std::fs::canonicalize(&sub).unwrap().to_string_lossy().to_string();
+        let paths = get_worktree_paths(&sub_canon);
+        assert_eq!(paths, vec![sub_canon]);
     }
     #[test]
     fn test_try_verify_decoded_path_existing() {

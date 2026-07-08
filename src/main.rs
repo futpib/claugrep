@@ -648,12 +648,22 @@ fn discover_sessions_for_scope(
             let sessions = collect(path);
             if sessions.is_empty() { vec![] } else { vec![(None, sessions)] }
         }
-        ProjectScope::Multi(projects) => projects.iter()
-            .filter_map(|p| {
-                let sessions = collect(&p.decoded_path);
-                if sessions.is_empty() { None } else { Some((Some(p.decoded_path.clone()), sessions)) }
-            })
-            .collect(),
+        ProjectScope::Multi(projects) => {
+            // Multiple ProjectInfo entries can share one decoded path (the same
+            // directory surfaced by several backends or config dirs). `collect`
+            // (via MultiSource) already unions every backend/config-dir for a
+            // path, so searching each distinct path once is both complete and
+            // free of the duplicate project blocks that per-entry iteration
+            // would produce. Preserve first-seen (mtime-sorted) order.
+            let mut seen = std::collections::HashSet::new();
+            projects.iter()
+                .filter(|p| seen.insert(p.decoded_path.clone()))
+                .filter_map(|p| {
+                    let sessions = collect(&p.decoded_path);
+                    if sessions.is_empty() { None } else { Some((Some(p.decoded_path.clone()), sessions)) }
+                })
+                .collect()
+        }
     }
 }
 
@@ -1755,6 +1765,71 @@ fn format_memory_line(line: &str, is_match: bool, patterns: &[Regex], max_line_w
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal `Source` for scope-grouping tests: returns exactly one session
+    /// for any path listed in `with_sessions`, none otherwise.
+    struct DupMock {
+        with_sessions: std::collections::HashSet<String>,
+    }
+
+    impl Source for DupMock {
+        fn name(&self) -> &'static str { "mock" }
+        fn discover_projects(&self) -> Vec<ProjectInfo> { vec![] }
+        fn discover_sessions(&self, project_path: &str) -> Vec<crate::sessions::SessionFile> {
+            if self.with_sessions.contains(project_path) {
+                vec![crate::sessions::SessionFile {
+                    session_id: format!("s-{}", project_path),
+                    file_path: PathBuf::from(format!("{}/x.jsonl", project_path)),
+                    mtime: std::time::UNIX_EPOCH,
+                    is_subagent: false,
+                    backend: "mock",
+                }]
+            } else {
+                vec![]
+            }
+        }
+        fn extract_content(&self, _: &crate::sessions::SessionFile, _: &HashSet<Target>, _: bool) -> Vec<crate::parser::ExtractedContent> { vec![] }
+        fn follow(&self, _: &crate::sessions::SessionFile, _: &HashSet<Target>, _: &mut dyn FnMut(&[crate::parser::ExtractedContent])) -> Result<(), String> { Ok(()) }
+        fn discover_memory_files(&self, _: &Path, _: bool) -> Vec<MemoryFile> { vec![] }
+    }
+
+    fn proj(decoded: &str) -> ProjectInfo {
+        ProjectInfo {
+            encoded_path: decoded.replace('/', "-"),
+            decoded_path: decoded.to_string(),
+            verified: true,
+            session_count: 1,
+            latest_mtime: None,
+            account: None,
+            backend: "mock",
+        }
+    }
+
+    #[test]
+    fn test_scope_grouping_dedups_same_path_across_backends() {
+        // Regression: two ProjectInfo entries for the same directory (as produced
+        // when several backends / config dirs surface it) must collapse to ONE
+        // search group. MultiSource::discover_sessions already unions every
+        // backend for a path, so per-entry iteration would search and print the
+        // same sessions twice — the duplicate `/home/claude` block bug.
+        let src = DupMock { with_sessions: ["/home/claude".to_string()].into_iter().collect() };
+        let scope = ProjectScope::Multi(vec![proj("/home/claude"), proj("/home/claude")]);
+        let groups = discover_sessions_for_scope(&scope, &src, None, None, true);
+        assert_eq!(groups.len(), 1, "duplicate project paths should collapse to one group");
+        assert_eq!(groups[0].0.as_deref(), Some("/home/claude"));
+    }
+
+    #[test]
+    fn test_scope_grouping_keeps_distinct_paths() {
+        // Guard against over-dedup: genuinely different projects stay separate.
+        let src = DupMock {
+            with_sessions: ["/home/claude".to_string(), "/home/claude/code".to_string()]
+                .into_iter().collect(),
+        };
+        let scope = ProjectScope::Multi(vec![proj("/home/claude"), proj("/home/claude/code")]);
+        let groups = discover_sessions_for_scope(&scope, &src, None, None, true);
+        assert_eq!(groups.len(), 2);
+    }
 
     #[test]
     fn test_parse_records_spec_single_positive() {
