@@ -657,6 +657,66 @@ fn discover_sessions_for_scope(
     }
 }
 
+/// Fallback discoverability aid: when a single-project search turns up no
+/// session files (the user is typically in a directory claugrep has no history
+/// for), scan every known project for the same pattern and report which ones do
+/// contain at least one match. Printed to stderr so it never contaminates
+/// stdout / piped output.
+///
+/// Kept cheap by stopping each project at its first hit (`max_results = 1`) and
+/// dropping all context extraction — so a project with a match returns almost
+/// immediately, and only genuinely non-matching projects pay a full scan.
+fn report_projects_with_matches(
+    source: &dyn Source,
+    options: &SearchOptions,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    before: Option<chrono::DateTime<chrono::Utc>>,
+) {
+    let disc_options = SearchOptions {
+        max_results: 1,
+        context_before: 0,
+        context_after: 0,
+        context_offsets: vec![],
+        context_type_filter: None,
+        // Only need the match targets; skip the wider extraction universe that
+        // record-context would otherwise pull in.
+        extract_targets: options.targets.targets.clone(),
+        json_output: false,
+        ..options.clone()
+    };
+
+    let scope = ProjectScope::Multi(source.discover_projects());
+    let groups = discover_sessions_for_scope(&scope, source, since, before, true);
+
+    // Dedup by project path: multiple backends can surface the same directory
+    // as separate groups, and we only want to name each project once.
+    let mut seen = std::collections::HashSet::new();
+    let mut hits: Vec<String> = Vec::new();
+    for (label, sessions) in &groups {
+        let Some(l) = label else { continue };
+        if !seen.contains(l) {
+            let (count, _) = search_sessions(source, sessions, &disc_options, |_| {});
+            if count > 0 {
+                seen.insert(l.clone());
+                hits.push(l.clone());
+            }
+        }
+    }
+
+    if hits.is_empty() {
+        eprintln!("No other projects contain matches for this pattern either.");
+    } else {
+        eprintln!(
+            "However, {} other project(s) contain matches for this pattern:",
+            hits.len()
+        );
+        for h in &hits {
+            eprintln!("  {}", h);
+        }
+        eprintln!("Re-run with --all-projects to search across them, or -p <path> to target one.");
+    }
+}
+
 /// Resolve the session selector for `dump`/`tail`, where the selector can come
 /// from the global `--session` flag or from the positional `<SESSION>` arg
 /// (default `"0"` = latest). Errors if the user supplied both with non-default
@@ -959,6 +1019,7 @@ fn main() {
                     _ => String::new(),
                 };
                 eprintln!("No session files found for project {}", project_path);
+                report_projects_with_matches(source, &options, since, before);
                 std::process::exit(1);
             }
 
