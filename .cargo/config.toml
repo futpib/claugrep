@@ -1,0 +1,9 @@
+# The `bundled` feature of rusqlite compiles sqlite3.c through the `cc` crate,
+# which picks up CFLAGS from the environment. Arch's makepkg puts `-flto=auto`
+# there, so sqlite3.o comes out as GCC LTO bitcode that rust-lld cannot link
+# ("undefined symbol: sqlite3_open_v2"). cc-rs prefers the target-specific
+# CFLAGS_<target> over the generic CFLAGS, so setting it here keeps LTO out of
+# the C build regardless of what the environment asks for.
+[env]
+CFLAGS_x86_64_unknown_linux_gnu = { value = "-fno-lto", force = true }
+CFLAGS_aarch64_unknown_linux_gnu = { value = "-fno-lto", force = true }
