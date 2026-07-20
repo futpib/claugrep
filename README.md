@@ -4,7 +4,7 @@
 
 Browse, search, and export AI coding-agent conversation transcripts from the command line.
 
-`claugrep` reads transcripts from multiple backends — [Claude Code](https://claude.ai/code)'s per-session `.jsonl` files under `~/.claude/projects/`, [opencode](https://opencode.ai)'s SQLite store at `~/.local/share/opencode/opencode.db`, and any future backend that implements the `Source` trait — and lets you grep across them, list sessions, or dump their content as plain text. By default both are searched (auto-detected); pass `--backend claude` or `--backend opencode` to pick one.
+`claugrep` reads transcripts from multiple backends — [Claude Code](https://claude.ai/code)'s per-session `.jsonl` files under `~/.claude/projects/`, Codex rollout files under `$CODEX_HOME/sessions` (normally `~/.codex/sessions`), and [opencode](https://opencode.ai)'s SQLite store at `~/.local/share/opencode/opencode.db` — and lets you grep across them, list sessions, or dump their content as plain text. By default every available backend is searched; pass `--backend claude`, `--backend codex`, or `--backend opencode` to select one.
 
 ## Installation
 
@@ -42,25 +42,27 @@ Commands:
 
 | Backend | Storage | Selection |
 |---------|---------|-----------|
-| `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | always, unless `--backend opencode` |
-| `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`session`/`message`/`part` tables) | always, unless `--backend claude`; override path with `--opencode-db` |
+| `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | `auto` or `--backend claude` |
+| `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions` | auto-detected or `--backend codex`; override root with `--codex-home` |
+| `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`session`/`message`/`part` tables) | auto-detected or `--backend opencode`; override path with `--opencode-db` |
 
-`auto` (the default) enables every backend whose store is present, so a single `claugrep search` spans both. `projects`/`sessions` listings annotate each row with its `[backend]` when more than one is active (and `[account]` for multi-account Claude).
+`auto` (the default) enables every backend whose store is present, so a single `claugrep search` spans all of them. `projects`/`sessions` listings annotate each row with its `[backend]` when more than one is active (and `[account]` for multi-account Claude).
 
 **Content-type coverage.** The `-t/--targets` filters work uniformly, but backends differ in what they can populate:
 
-- Both populate: `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `compact-summary`.
+- Codex populates `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `subagent-prompt`, and `compact-summary`. Calls/results are correlated by call ID, wrapped shell/apply-patch calls are normalized to their underlying tool, and direct edit calls use the shared unified-diff renderer. Developer/system context and encrypted reasoning payloads are intentionally not exposed.
+- Claude and opencode populate: `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `compact-summary`.
 - Claude-only (transcript-internal telemetry with no opencode equivalent): `system`, `attachment`, `progress`, `file-history-snapshot`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types. These stay empty for opencode sessions.
 - opencode `edit` calls render as unified diffs exactly like Claude's, via the same `EditDiff` path.
 - Tool-name subtypes match case-insensitively, so `-t tool-use.bash` finds both Claude's `Bash` and opencode's `bash`. opencode tool names are otherwise passed through verbatim (including MCP/plugin names like `web-search-prime_web_search_prime`).
 - opencode merges a tool call and its result into one record, but claugrep surfaces them as up to three separate records (`bash-command` + `tool-use` + `bash-output`) so a default search sees every facet — matching Claude's `tool_use`-block + `tool_result` shape.
 
 **Known asymmetries (inherent to the data, not bugs):**
-- `--json` raw records carry a **normalized envelope** so the cross-backend keys port: `sessionId`, `timestamp`, `type` (the message role — `user`/`assistant`, matching Claude's record-level `type`), plus opencode's `partType` (`text`/`tool`/`reasoning`/…) and `slot` (`cmd`/`use`/`out`/…). So `jq .sessionId` and `select(.type=="user")` work identically on both backends. The *deep content* structure still differs (Claude's `message.content[]` block array vs opencode's flat part fields) — that difference is irreducible; reach for the human-normalized fields (`text`, `tool`) for portable content access.
+- `--json` raw records carry a **normalized envelope** so the cross-backend keys port: `sessionId`, `timestamp`, and `type`. So `jq .sessionId` and `select(.type=="user")` work identically across backends. Backend-native deep content remains under its original structure; Codex additionally preserves the original top-level record type as `itemType`.
 - `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not persist the generated compaction summary as searchable prose (verified: `session_context_epoch.baseline` is empty and no summary part is stored near the boundary), so that target can't be fully equivalent. The boundary marker is the best available.
 - opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 
-`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), opencode walks `AGENTS.md`.
+`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), while Codex and opencode walk `AGENTS.md`.
 
 ### Global options
 
@@ -68,7 +70,8 @@ These options are accepted by every subcommand. Subcommands ignore options they 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--backend <which>` | `auto` | Transcript backend(s): `auto` (every backend with data), `claude`, or `opencode` |
+| `--backend <which>` | `auto` | Transcript backend(s): `auto` (every backend with data), `claude`, `codex`, or `opencode` |
+| `--codex-home <path>` | `$CODEX_HOME` or `~/.codex` | Override the Codex data root |
 | `--opencode-db <path>` | *XDG data dir* | Path to the opencode SQLite DB (`$XDG_DATA_HOME/opencode/opencode.db`) |
 | `--config-dir <path>` | `~/.claude` | Claude config directory (overrides `CLAUDE_CONFIG_DIR`) |
 | `--account <name>` | | Filter to a specific Claude account (claudex multi-account support) |

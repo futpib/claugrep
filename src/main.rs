@@ -39,12 +39,14 @@ enum BackendSel {
     Auto,
     /// Only the Claude Code JSONL backend.
     Claude,
+    /// Only the Codex JSONL rollout backend.
+    Codex,
     /// Only the opencode SQLite backend.
     Opencode,
 }
 
 #[derive(Parser)]
-#[command(name = "claugrep", about = "Browse, search, and export Claude conversation transcripts")]
+#[command(name = "claugrep", about = "Browse, search, and export coding-agent conversation transcripts")]
 struct Cli {
     /// Claude config directory (default: ~/.claude, overrides CLAUDE_CONFIG_DIR env var)
     #[arg(long, global = true)]
@@ -54,13 +56,17 @@ struct Cli {
     #[arg(long, global = true)]
     account: Option<String>,
 
-    /// Backend(s) to read: auto (default), claude, or opencode
+    /// Backend(s) to read: auto (default), claude, codex, or opencode
     #[arg(long, global = true, value_enum, default_value_t = BackendSel::Auto)]
     backend: BackendSel,
 
     /// Path to the opencode SQLite DB (default: $XDG_DATA_HOME/opencode/opencode.db)
     #[arg(long = "opencode-db", global = true, value_name = "PATH")]
     opencode_db: Option<PathBuf>,
+
+    /// Codex home directory (default: $CODEX_HOME or ~/.codex)
+    #[arg(long = "codex-home", global = true, value_name = "PATH")]
+    codex_home: Option<PathBuf>,
 
     /// When to use colors: auto, always, never (also respects NO_COLOR env var)
     #[arg(long, global = true, default_value = "auto", value_name = "WHEN")]
@@ -120,7 +126,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Search Claude Code conversation transcripts
+    /// Search coding-agent conversation transcripts
     #[command(alias = "s")]
     Search {
         /// Pattern to search (literal string and/or regex)
@@ -187,7 +193,7 @@ enum Commands {
         count: usize,
     },
 
-    /// List all known projects under ~/.claude/projects/
+    /// List all projects known to the active backends
     Projects {
         /// List sessions within each project
         #[arg(short = 's', long)]
@@ -870,8 +876,18 @@ fn main() {
     // enables every backend that has a usable store.
     let claude_config_dirs = effective_config_dirs(cli.config_dir.as_ref(), cli.account.as_deref());
     let mut children: Vec<Box<dyn Source>> = Vec::new();
-    if !matches!(cli.backend, BackendSel::Opencode) {
+    if matches!(cli.backend, BackendSel::Auto | BackendSel::Claude) {
         children.push(Box::new(backends::claude::ClaudeSource::new(claude_config_dirs.clone())));
+    }
+    if matches!(cli.backend, BackendSel::Auto | BackendSel::Codex) {
+        let home = cli.codex_home.clone()
+            .unwrap_or_else(backends::codex::CodexSource::default_home);
+        if home.join("sessions").is_dir() {
+            children.push(Box::new(backends::codex::CodexSource::new(home)));
+        } else if matches!(cli.backend, BackendSel::Codex) {
+            eprintln!("error: --backend codex selected but no sessions directory found under {}; pass --codex-home <path>", home.display());
+            std::process::exit(2);
+        }
     }
     if matches!(cli.backend, BackendSel::Auto | BackendSel::Opencode) {
         let db = cli.opencode_db.clone()
@@ -913,7 +929,7 @@ fn main() {
     let Cli {
         command,
         config_dir: _, account: _, color: _, after: _, before: _,
-        backend: _, opencode_db: _,
+        backend: _, opencode_db: _, codex_home: _,
         project,
         all_projects,
         project_regexp,
