@@ -67,8 +67,8 @@ pub trait Source {
         on_records: &mut dyn FnMut(&[ExtractedContent]),
     ) -> Result<(), String>;
 
-    /// Memory / instructions files that apply to `cwd` for this backend
-    /// (CLAUDE.md for Claude, AGENTS.md for opencode, …), in load order.
+    /// Memory / instructions files available to this backend for `cwd`
+    /// (CLAUDE.md, AGENTS.md, native memory stores, …), in load order.
     fn discover_memory_files(&self, cwd: &Path, include_subdirs: bool) -> Vec<MemoryFile>;
 }
 

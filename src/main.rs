@@ -222,7 +222,7 @@ enum Commands {
         session_pos: String,
     },
 
-    /// Inspect the CLAUDE.md and auto-memory markdown files that apply to a directory
+    /// Inspect instruction and native memory markdown files for a directory
     Memory {
         #[command(subcommand)]
         subcommand: MemoryCommands,
@@ -233,7 +233,7 @@ enum Commands {
 enum MemoryCommands {
     /// Print every markdown memory file that applies to the project
     Dump {
-        /// Exclude on-demand CLAUDE.md files in subdirectories
+        /// Exclude instruction files in project subdirectories
         #[arg(long = "no-subdirs")]
         no_subdirs: bool,
 
@@ -247,7 +247,7 @@ enum MemoryCommands {
         /// Pattern to search (literal string and/or regex)
         pattern: String,
 
-        /// Exclude on-demand CLAUDE.md files in subdirectories
+        /// Exclude instruction files in project subdirectories
         #[arg(long = "no-subdirs")]
         no_subdirs: bool,
 
@@ -882,10 +882,10 @@ fn main() {
     if matches!(cli.backend, BackendSel::Auto | BackendSel::Codex) {
         let home = cli.codex_home.clone()
             .unwrap_or_else(backends::codex::CodexSource::default_home);
-        if home.join("sessions").is_dir() {
+        if backends::codex::CodexSource::is_available(&home) {
             children.push(Box::new(backends::codex::CodexSource::new(home)));
         } else if matches!(cli.backend, BackendSel::Codex) {
-            eprintln!("error: --backend codex selected but no sessions directory found under {}; pass --codex-home <path>", home.display());
+            eprintln!("error: --backend codex selected but no sessions, memories, or AGENTS.md found under {}; pass --codex-home <path>", home.display());
             std::process::exit(2);
         }
     }

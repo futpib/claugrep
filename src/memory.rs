@@ -19,6 +19,12 @@ pub enum MemorySource {
     AutoMemoryIndex,
     /// A topic file in the auto-memory directory (loaded on demand).
     AutoMemoryTopic,
+    /// Codex's compact, always-loaded native memory summary.
+    CodexMemorySummary,
+    /// Codex's native memory registry (`$CODEX_HOME/memories/MEMORY.md`).
+    CodexMemoryRegistry,
+    /// Any other markdown file in Codex's native memory tree.
+    CodexMemoryFile,
     /// Imported inline via `@path` from another memory file.
     Import,
 }
@@ -32,6 +38,9 @@ impl MemorySource {
             MemorySource::Subdir           => "subdir",
             MemorySource::AutoMemoryIndex  => "auto-memory-index",
             MemorySource::AutoMemoryTopic  => "auto-memory-topic",
+            MemorySource::CodexMemorySummary  => "codex-memory-summary",
+            MemorySource::CodexMemoryRegistry => "codex-memory-registry",
+            MemorySource::CodexMemoryFile     => "codex-memory-file",
             MemorySource::Import           => "import",
         }
     }
@@ -52,9 +61,9 @@ fn encode_project_path(path: &str) -> String {
 /// Per-backend description of where instruction / memory files live.
 ///
 /// Claude Code looks for `CLAUDE.md` / `CLAUDE.local.md` with a managed policy
-/// at `/etc/claude-code/CLAUDE.md` and an auto-memory tree; opencode looks for
-/// `AGENTS.md` with no managed policy and (currently) no auto-memory. Both are
-/// just different [`MemoryLayout`]s fed to the same generic walker.
+/// at `/etc/claude-code/CLAUDE.md` and an auto-memory tree; Codex and opencode
+/// look for `AGENTS.md`. Backend-specific stores, such as Codex's native memory
+/// tree, are appended by the backend after this generic walk.
 pub struct MemoryLayout {
     /// Filenames searched at every level (managed, global, ancestor, subdir).
     pub filenames: Vec<String>,

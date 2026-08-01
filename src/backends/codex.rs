@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 
 use serde_json::Value;
 
-use crate::memory::{discover_with_layout, MemoryFile, MemoryLayout};
+use crate::memory::{discover_with_layout, MemoryFile, MemoryLayout, MemorySource};
 use crate::parser::{EditDiff, ExtractedContent, Target};
 use crate::sessions::{get_worktree_paths, ProjectInfo, SessionFile};
 use crate::source::Source;
@@ -43,6 +43,12 @@ impl CodexSource {
             .unwrap_or_else(|_| dirs::home_dir().expect("no home dir").join(".codex"))
     }
 
+    pub fn is_available(home: &Path) -> bool {
+        home.join("sessions").is_dir()
+            || home.join("memories").is_dir()
+            || home.join("AGENTS.md").is_file()
+    }
+
     fn rollouts(&self) -> &[RolloutMeta] {
         self.rollouts.get_or_init(|| {
             let mut files = Vec::new();
@@ -62,6 +68,72 @@ fn collect_jsonl(dir: &Path, out: &mut Vec<PathBuf>) {
         if path.is_dir() {
             collect_jsonl(&path, out);
         } else if path.extension().and_then(|x| x.to_str()) == Some("jsonl") {
+            out.push(path);
+        }
+    }
+}
+
+/// Discover Codex's first-class memory store. The summary and registry are
+/// emitted first because they are the entry points Codex itself uses; remaining
+/// markdown resources follow in stable path order for deterministic output.
+fn discover_native_memory_files(home: &Path) -> Vec<MemoryFile> {
+    let root = home.join("memories");
+    let summary = root.join("memory_summary.md");
+    let registry = root.join("MEMORY.md");
+    let transient_diff = root.join("phase2_workspace_diff.md");
+    let mut paths = Vec::new();
+
+    collect_native_memory_markdown(&root, &transient_diff, &mut paths);
+    paths.sort_by(|a, b| {
+        let rank = |path: &Path| {
+            if path == summary {
+                0
+            } else if path == registry {
+                1
+            } else {
+                2
+            }
+        };
+        rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+    });
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let source = if path == summary {
+                MemorySource::CodexMemorySummary
+            } else if path == registry {
+                MemorySource::CodexMemoryRegistry
+            } else {
+                MemorySource::CodexMemoryFile
+            };
+            MemoryFile {
+                path,
+                source,
+                imported_by: None,
+            }
+        })
+        .collect()
+}
+
+fn collect_native_memory_markdown(dir: &Path, transient_diff: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            if entry.file_name() != ".git" {
+                collect_native_memory_markdown(&path, transient_diff, out);
+            }
+        } else if file_type.is_file()
+            && path != transient_diff
+            && path.extension().and_then(|extension| extension.to_str()) == Some("md")
+        {
             out.push(path);
         }
     }
@@ -544,7 +616,7 @@ impl Source for CodexSource {
     }
 
     fn discover_memory_files(&self, cwd: &Path, include_subdirs: bool) -> Vec<MemoryFile> {
-        discover_with_layout(
+        let mut files = discover_with_layout(
             cwd,
             &MemoryLayout {
                 filenames: vec!["AGENTS.md".into()],
@@ -553,7 +625,9 @@ impl Source for CodexSource {
                 auto_memory: None,
             },
             include_subdirs,
-        )
+        );
+        files.extend(discover_native_memory_files(&self.home));
+        files
     }
 }
 
@@ -637,5 +711,90 @@ mod tests {
         .unwrap();
         extract_entry(&compact, &targets, "s", false, false, &mut state, &mut out);
         assert_eq!(out[1].target, Target::CompactSummary);
+    }
+
+    #[test]
+    fn discovers_native_memory_tree_in_codex_load_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let memories = tmp.path().join("memories");
+        fs::create_dir_all(project.join("nested")).unwrap();
+        fs::create_dir_all(memories.join("rollout_summaries")).unwrap();
+        fs::create_dir_all(memories.join("skills/example")).unwrap();
+        fs::create_dir_all(memories.join("extensions/import/resources")).unwrap();
+        fs::create_dir_all(memories.join(".git")).unwrap();
+
+        fs::write(tmp.path().join("AGENTS.md"), "global instructions").unwrap();
+        fs::write(project.join("nested/AGENTS.md"), "nested instructions").unwrap();
+        fs::write(memories.join("memory_summary.md"), "summary").unwrap();
+        fs::write(memories.join("MEMORY.md"), "registry").unwrap();
+        fs::write(memories.join("raw_memories.md"), "raw details").unwrap();
+        fs::write(memories.join("rollout_summaries/session.md"), "rollout").unwrap();
+        fs::write(memories.join("skills/example/SKILL.md"), "skill").unwrap();
+        fs::write(
+            memories.join("extensions/import/resources/topic.md"),
+            "imported topic",
+        )
+        .unwrap();
+        fs::write(
+            memories.join("phase2_workspace_diff.md"),
+            "temporary prompt input",
+        )
+        .unwrap();
+        fs::write(memories.join(".git/hidden.md"), "git internals").unwrap();
+        fs::write(memories.join("ignored.txt"), "not markdown").unwrap();
+
+        let source = CodexSource::new(tmp.path().to_path_buf());
+        let files = source.discover_memory_files(&project, false);
+        let native: Vec<_> = files
+            .iter()
+            .filter(|file| file.path.starts_with(&memories))
+            .map(|file| {
+                (
+                    file.path.strip_prefix(&memories).unwrap().to_path_buf(),
+                    file.source,
+                )
+            })
+            .collect();
+
+        assert_eq!(files[0].path, tmp.path().join("AGENTS.md"));
+        assert_eq!(
+            native,
+            vec![
+                (
+                    PathBuf::from("memory_summary.md"),
+                    MemorySource::CodexMemorySummary
+                ),
+                (
+                    PathBuf::from("MEMORY.md"),
+                    MemorySource::CodexMemoryRegistry
+                ),
+                (
+                    PathBuf::from("extensions/import/resources/topic.md"),
+                    MemorySource::CodexMemoryFile,
+                ),
+                (
+                    PathBuf::from("raw_memories.md"),
+                    MemorySource::CodexMemoryFile,
+                ),
+                (
+                    PathBuf::from("rollout_summaries/session.md"),
+                    MemorySource::CodexMemoryFile,
+                ),
+                (
+                    PathBuf::from("skills/example/SKILL.md"),
+                    MemorySource::CodexMemoryFile,
+                ),
+            ]
+        );
+        assert!(!files
+            .iter()
+            .any(|file| file.path.ends_with("nested/AGENTS.md")));
+        assert!(!files
+            .iter()
+            .any(|file| file.path.ends_with("phase2_workspace_diff.md")));
+        assert!(!files
+            .iter()
+            .any(|file| file.path.ends_with(".git/hidden.md")));
     }
 }

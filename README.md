@@ -43,7 +43,7 @@ Commands:
 | Backend | Storage | Selection |
 |---------|---------|-----------|
 | `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | `auto` or `--backend claude` |
-| `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions` | auto-detected or `--backend codex`; override root with `--codex-home` |
+| `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions`; native memory under `$CODEX_HOME/memories` | auto-detected or `--backend codex`; override root with `--codex-home` |
 | `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`session`/`message`/`part` tables) | auto-detected or `--backend opencode`; override path with `--opencode-db` |
 
 `auto` (the default) enables every backend whose store is present, so a single `claugrep search` spans all of them. `projects`/`sessions` listings annotate each row with its `[backend]` when more than one is active (and `[account]` for multi-account Claude).
@@ -62,7 +62,7 @@ Commands:
 - `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not persist the generated compaction summary as searchable prose (verified: `session_context_epoch.baseline` is empty and no summary part is stored near the boundary), so that target can't be fully equivalent. The boundary marker is the best available.
 - opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 
-`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), while Codex and opencode walk `AGENTS.md`.
+`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), Codex walks `AGENTS.md` plus every markdown resource in `$CODEX_HOME/memories`, and opencode walks `AGENTS.md`. Codex emits `memory_summary.md` and `MEMORY.md` first, recursively includes rollout summaries, skills, and imported extension resources, and excludes the transient `phase2_workspace_diff.md` prompt artifact.
 
 ### Global options
 
@@ -224,7 +224,7 @@ Shows the last N content records of a session, sorted by timestamp. Optionally f
 claugrep memory dump [--no-subdirs] [-l|--files-only] [GLOBAL OPTIONS]
 ```
 
-Prints every markdown memory file (`CLAUDE.md`, auto-memory) that applies to the project. Single-project only — `--all-projects`/`-P` are rejected.
+Prints every markdown instruction or memory file available to the selected backend. For Codex this includes `AGENTS.md` plus the native `$CODEX_HOME/memories` tree. Single-project only — `--all-projects`/`-P` are rejected.
 
 ### `claugrep memory search`
 
@@ -238,7 +238,7 @@ Searches markdown memory files for `PATTERN`. Single-project only — `--all-pro
 |------|-------------|
 | `-C/-B/-A` | Line-level context flags (same semantics as `search`) |
 | `-i/-F/-E` | Case-insensitive / fixed-string / extended regex |
-| `--no-subdirs` | Exclude on-demand `CLAUDE.md` files in subdirectories |
+| `--no-subdirs` | Exclude instruction files in project subdirectories; native memory stores are unaffected |
 | `-l, --list` | Print only file paths with matches (alias `--files-with-matches`) |
 
 ## Examples
