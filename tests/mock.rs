@@ -336,6 +336,25 @@ impl SessionBuilder {
         self
     }
 
+    /// Write a file-history-delta record for one tracked file update.
+    fn file_history_delta(mut self, path: &str, backup_file_name: Option<&str>) -> Self {
+        let ts = self.next_ts();
+        let mid = format!("msg-{:04}", self.ts_secs);
+        self.write(serde_json::json!({
+            "type": "file-history-delta",
+            "messageId": mid,
+            "snapshotMessageId": "snapshot-0001",
+            "trackingPath": path,
+            "backup": {
+                "backupFileName": backup_file_name,
+                "version": 1,
+                "backupTime": ts,
+            },
+            "timestamp": ts,
+        }));
+        self
+    }
+
     /// Write a queue-operation record.
     fn queue_operation(mut self, operation: &str, content: Option<&str>) -> Self {
         let ts = self.next_ts();
@@ -3039,6 +3058,70 @@ fn test_file_history_snapshot_not_in_default_not_warned() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// file-history-delta target
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_search_file_history_delta() {
+    let world = MockWorld::new();
+    let proj = world.project("fhd-search");
+    proj.session("sess-fhd")
+        .user_message("hello")
+        .file_history_delta("src/UNIQUE_DELTA_FILE.rs", Some("abcdef@v1"))
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_DELTA_FILE", "-t", "file-history-delta", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t file-history-delta should find delta records");
+}
+
+#[test]
+fn test_file_history_delta_via_all() {
+    let world = MockWorld::new();
+    let proj = world.project("fhd-all");
+    proj.session("sess-fhda")
+        .file_history_delta("src/UNIQUE_DELTA_ALL.rs", None)
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_DELTA_ALL", "-t", "all", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t all should include file-history-delta records");
+}
+
+#[test]
+fn test_file_history_delta_not_in_default_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("fhd-nowarn");
+    proj.session("sess-fhdw")
+        .user_message("hello")
+        .file_history_delta("src/main.rs", None)
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert!(!text.contains("src/main.rs"),
+        "file-history-delta records should not appear in default targets");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "file-history-delta records should not trigger unrecognized record warnings");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // queue-operation target
 // ═════════════════════════════════════════════════════════════════════════════
 

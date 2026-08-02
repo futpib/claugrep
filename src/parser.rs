@@ -18,6 +18,7 @@ pub enum Target {
     CompactSummary,
     System,
     FileHistorySnapshot,
+    FileHistoryDelta,
     QueueOperation,
     LastPrompt,
     AgentName,
@@ -47,6 +48,7 @@ impl fmt::Display for Target {
             Target::CompactSummary => "compact-summary",
             Target::System => "system",
             Target::FileHistorySnapshot => "file-history-snapshot",
+            Target::FileHistoryDelta => "file-history-delta",
             Target::QueueOperation => "queue-operation",
             Target::LastPrompt => "last-prompt",
             Target::AgentName => "agent-name",
@@ -77,6 +79,7 @@ impl FromStr for Target {
             "compact-summary" => Target::CompactSummary,
             "system" => Target::System,
             "file-history-snapshot" => Target::FileHistorySnapshot,
+            "file-history-delta" => Target::FileHistoryDelta,
             "queue-operation" => Target::QueueOperation,
             "last-prompt" => Target::LastPrompt,
             "agent-name" => Target::AgentName,
@@ -115,6 +118,7 @@ impl Target {
             | Target::SubagentPrompt
             | Target::CompactSummary
             | Target::FileHistorySnapshot
+            | Target::FileHistoryDelta
             | Target::LastPrompt
             | Target::AgentName
             | Target::CustomTitle
@@ -404,6 +408,21 @@ pub fn extract_from_entry(
                     text,
                     tool_name: None,
                     timestamp: snap_ts.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        Some("file-history-delta") => {
+            if targets.contains(&Target::FileHistoryDelta) {
+                let path = entry["trackingPath"].as_str().unwrap_or("");
+                let version = entry["backup"]["version"].as_u64().unwrap_or(0);
+                out.push(ExtractedContent {
+                    target: Target::FileHistoryDelta,
+                    text: format!("{} (v{})", path, version),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
                     session_id: entry_session.to_string(),
                     edit_diff: None,
                     raw_entry: None,
@@ -1138,7 +1157,8 @@ mod tests {
         [
             Target::User, Target::Assistant, Target::Thinking, Target::BashCommand, Target::BashOutput,
             Target::ToolUse, Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
-            Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
+            Target::System, Target::FileHistorySnapshot, Target::FileHistoryDelta,
+            Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
             Target::PullRequest, Target::BridgeSession, Target::Mode,
@@ -1808,7 +1828,8 @@ mod tests {
             Target::User, Target::Assistant, Target::Thinking,
             Target::BashCommand, Target::BashOutput, Target::ToolUse,
             Target::ToolResult, Target::SubagentPrompt, Target::CompactSummary,
-            Target::System, Target::FileHistorySnapshot, Target::QueueOperation,
+            Target::System, Target::FileHistorySnapshot, Target::FileHistoryDelta,
+            Target::QueueOperation,
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
             Target::PullRequest, Target::BridgeSession, Target::Mode,

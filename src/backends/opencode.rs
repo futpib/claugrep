@@ -12,7 +12,8 @@
 //!     `time_updated` rather than a byte-tail with partial-line/rotation races.
 //!
 //! Some Claude transcript-internal record types (`system.away_summary`,
-//! `attachment.task_reminder`, `progress`, `file-history-snapshot`, …) have no
+//! `attachment.task_reminder`, `progress`, `file-history-snapshot`,
+//! `file-history-delta`, …) have no
 //! opencode equivalent and simply stay empty for opencode sessions; the core
 //! targets (user / assistant / thinking / bash / tool) map fully.
 

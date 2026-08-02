@@ -52,7 +52,7 @@ Commands:
 
 - Codex populates `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `subagent-prompt`, and `compact-summary`. Calls/results are correlated by call ID, wrapped shell/apply-patch calls are normalized to their underlying tool, and direct edit calls use the shared unified-diff renderer. Developer/system context and encrypted reasoning payloads are intentionally not exposed.
 - Claude and opencode populate: `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `compact-summary`.
-- Claude-only (transcript-internal telemetry with no opencode equivalent): `system`, `attachment`, `progress`, `file-history-snapshot`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types. These stay empty for opencode sessions.
+- Claude-only (transcript-internal telemetry with no opencode equivalent): `system`, `attachment`, `progress`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types. These stay empty for opencode sessions.
 - opencode `edit` calls render as unified diffs exactly like Claude's, via the same `EditDiff` path.
 - Tool-name subtypes match case-insensitively, so `-t tool-use.bash` finds both Claude's `Bash` and opencode's `bash`. opencode tool names are otherwise passed through verbatim (including MCP/plugin names like `web-search-prime_web_search_prime`).
 - opencode merges a tool call and its result into one record, but claugrep surfaces them as up to three separate records (`bash-command` + `tool-use` + `bash-output`) so a default search sees every facet — matching Claude's `tool_use`-block + `tool_result` shape.
@@ -111,6 +111,7 @@ The project path is resolved to a canonical absolute path and matched against th
 | `ai-title` | AI-generated session titles |
 | `system` | System messages (internal) |
 | `file-history-snapshot` | File history snapshots (internal) |
+| `file-history-delta` | Individual file history updates (internal) |
 
 Use `TYPE.SUBTYPE` for narrower filters (e.g. `system.away_summary`, `tool-use.Edit`). The keyword `default` selects standard types (including session titles); `all` includes internal types.
 
