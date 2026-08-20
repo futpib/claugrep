@@ -35,12 +35,14 @@ enum ColorWhen {
 /// Which transcript backend(s) to read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum BackendSel {
-    /// Use every backend that has data (Claude JSONL + opencode SQLite + …).
+    /// Use every backend that has an available transcript or memory store.
     Auto,
     /// Only the Claude Code JSONL backend.
     Claude,
     /// Only the Codex JSONL rollout backend.
     Codex,
+    /// Only the Grok Build JSONL backend.
+    Grok,
     /// Only the opencode SQLite backend.
     Opencode,
 }
@@ -56,7 +58,7 @@ struct Cli {
     #[arg(long, global = true)]
     account: Option<String>,
 
-    /// Backend(s) to read: auto (default), claude, codex, or opencode
+    /// Backend(s) to read: auto (default), claude, codex, grok, or opencode
     #[arg(long, global = true, value_enum, default_value_t = BackendSel::Auto)]
     backend: BackendSel,
 
@@ -67,6 +69,10 @@ struct Cli {
     /// Codex home directory (default: $CODEX_HOME or ~/.codex)
     #[arg(long = "codex-home", global = true, value_name = "PATH")]
     codex_home: Option<PathBuf>,
+
+    /// Grok home directory (default: $GROK_HOME or ~/.grok)
+    #[arg(long = "grok-home", global = true, value_name = "PATH")]
+    grok_home: Option<PathBuf>,
 
     /// When to use colors: auto, always, never (also respects NO_COLOR env var)
     #[arg(long, global = true, default_value = "auto", value_name = "WHEN")]
@@ -890,6 +896,16 @@ fn main() {
             std::process::exit(2);
         }
     }
+    if matches!(cli.backend, BackendSel::Auto | BackendSel::Grok) {
+        let home = cli.grok_home.clone()
+            .unwrap_or_else(backends::grok::GrokSource::default_home);
+        if backends::grok::GrokSource::is_available(&home) {
+            children.push(Box::new(backends::grok::GrokSource::new(home)));
+        } else if matches!(cli.backend, BackendSel::Grok) {
+            eprintln!("error: --backend grok selected but no sessions, memories, or project rules found under {}; pass --grok-home <path>", home.display());
+            std::process::exit(2);
+        }
+    }
     if matches!(cli.backend, BackendSel::Auto | BackendSel::Opencode) {
         let db = cli.opencode_db.clone()
             .or_else(backends::opencode::OpenCodeSource::default_db_path);
@@ -930,7 +946,7 @@ fn main() {
     let Cli {
         command,
         config_dir: _, account: _, color: _, after: _, before: _,
-        backend: _, opencode_db: _, codex_home: _,
+        backend: _, opencode_db: _, codex_home: _, grok_home: _,
         project,
         all_projects,
         project_regexp,
@@ -1264,15 +1280,15 @@ fn main() {
             }
 
             if json {
-                fn title_json(s: &sessions::SessionFile) -> serde_json::Value {
+                let title_json = |s: &sessions::SessionFile| -> serde_json::Value {
                     if s.is_subagent {
                         return serde_json::Value::Null;
                     }
-                    match sessions::session_title(&s.file_path) {
+                    match source.session_title(s) {
                         Some(t) => json!(t),
                         None => serde_json::Value::Null,
                     }
-                }
+                };
                 let output: serde_json::Value = if is_multi {
                     let arr: Vec<_> = session_groups.iter().map(|(label, sessions)| {
                         let sess_json: Vec<_> = sessions.iter().map(|s| {
@@ -1327,7 +1343,7 @@ fn main() {
                         let title_part = if s.is_subagent {
                             String::new()
                         } else {
-                            match sessions::session_title(&s.file_path) {
+                            match source.session_title(s) {
                                 Some(t) => format!("  {}", console::style(t).dim()),
                                 None => String::new(),
                             }

@@ -25,6 +25,10 @@ pub enum MemorySource {
     CodexMemoryRegistry,
     /// Any other markdown file in Codex's native memory tree.
     CodexMemoryFile,
+    /// Grok Build's global native memory (`$GROK_HOME/memory/MEMORY.md`).
+    GrokMemoryGlobal,
+    /// Grok Build's workspace-scoped native memory tree.
+    GrokMemoryWorkspace,
     /// Imported inline via `@path` from another memory file.
     Import,
 }
@@ -41,6 +45,8 @@ impl MemorySource {
             MemorySource::CodexMemorySummary  => "codex-memory-summary",
             MemorySource::CodexMemoryRegistry => "codex-memory-registry",
             MemorySource::CodexMemoryFile     => "codex-memory-file",
+            MemorySource::GrokMemoryGlobal    => "grok-memory-global",
+            MemorySource::GrokMemoryWorkspace => "grok-memory-workspace",
             MemorySource::Import           => "import",
         }
     }

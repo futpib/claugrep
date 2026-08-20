@@ -9,8 +9,8 @@
 //!   3. a live-follow primitive (for `tail -f`), and
 //!   4. the memory / instructions files that apply to a directory.
 //!
-//! Those four capabilities are the [`Source`] trait. Each backend (Claude's
-//! JSONL files, opencode's SQLite DB, and future ones — codex, …) is one
+//! Those four capabilities are the [`Source`] trait. Each backend (Claude's,
+//! Codex's, and Grok's JSONL files; opencode's SQLite DB; …) is one
 //! self-contained `impl Source`. [`MultiSource`] composes any number of them
 //! behind a single `&dyn Source`, merging discovery and dispatching per-session
 //! operations to the owning backend via the `SessionFile::backend` tag. That
@@ -70,6 +70,12 @@ pub trait Source {
     /// Memory / instructions files available to this backend for `cwd`
     /// (CLAUDE.md, AGENTS.md, native memory stores, …), in load order.
     fn discover_memory_files(&self, cwd: &Path, include_subdirs: bool) -> Vec<MemoryFile>;
+
+    /// Display title for a session. JSONL backends use the shared title-record
+    /// reader by default; backends with separate metadata can override this.
+    fn session_title(&self, session: &SessionFile) -> Option<String> {
+        crate::sessions::session_title(&session.file_path)
+    }
 }
 
 /// A [`Source`] composed of several backends. Discovery merges across all
@@ -179,8 +185,7 @@ impl Source for MultiSource {
     }
 
     fn discover_memory_files(&self, cwd: &Path, include_subdirs: bool) -> Vec<MemoryFile> {
-        // Order: preserve child order (callers construct Claude first, then
-        // opencode, …). dedup by path so a backend that happens to share a file
+        // Order: preserve child order. Dedup by path so a backend that shares a file
         // doesn't double-list it.
         let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
         let mut out: Vec<MemoryFile> = Vec::new();
@@ -192,5 +197,10 @@ impl Source for MultiSource {
             }
         }
         out
+    }
+
+    fn session_title(&self, session: &SessionFile) -> Option<String> {
+        self.child_for(session.backend)
+            .and_then(|child| child.session_title(session))
     }
 }
