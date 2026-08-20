@@ -68,6 +68,21 @@ impl GrokWorld {
         fs::write(dir.join("updates.jsonl"), format!("{}\n", body)).unwrap();
         dir
     }
+
+    fn add_summary_fields(&self, id: &str, fields: Value) {
+        let path = self
+            .home
+            .path()
+            .join("sessions/project")
+            .join(id)
+            .join("summary.json");
+        let mut summary: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        summary
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        fs::write(path, serde_json::to_vec(&summary).unwrap()).unwrap();
+    }
 }
 
 fn update(timestamp: i64, session_id: &str, update: Value) -> Value {
@@ -265,6 +280,379 @@ fn searches_messages_tools_diffs_recaps_titles_and_json() {
 }
 
 #[test]
+fn maps_grok_lifecycle_updates_and_full_checkpoint_summary() {
+    let world = GrokWorld::new();
+    let id = "grok-lifecycle";
+    let session_dir = world.add_session(
+        id,
+        "Lifecycle test",
+        false,
+        None,
+        "2026-08-20T12:00:20Z",
+        &[
+            update(
+                1_777_000_020,
+                id,
+                json!({
+                    "sessionUpdate": "plan",
+                    "entries": [{"content": "PARITY_PLAN_MARKER", "status": "in_progress", "priority": "high"}],
+                }),
+            ),
+            update(
+                1_777_000_021,
+                id,
+                json!({
+                    "sessionUpdate": "hook_execution",
+                    "event_name": "PostToolUse",
+                    "tool_name": "search_replace",
+                    "runs": [{
+                        "name": "parity-hook",
+                        "status": {"status": "completed", "elapsed_ms": 12},
+                        "output": "PARITY_HOOK_OUTPUT"
+                    }],
+                }),
+            ),
+            update(
+                1_777_000_022,
+                id,
+                json!({
+                    "sessionUpdate": "retry_state",
+                    "type": "retrying",
+                    "attempt": 2,
+                    "max_retries": 4,
+                    "reason": "PARITY_RETRY_REASON",
+                }),
+            ),
+            update(
+                1_777_000_023,
+                id,
+                json!({
+                    "sessionUpdate": "task_backgrounded",
+                    "task_id": "task-parity",
+                    "description": "PARITY_BACKGROUND_START",
+                    "command": "cargo test",
+                    "cwd": "/repo",
+                }),
+            ),
+            update(
+                1_777_000_024,
+                id,
+                json!({
+                    "sessionUpdate": "task_completed",
+                    "task_snapshot": {
+                        "kind": "bash",
+                        "task_id": "task-parity",
+                        "command": "cargo test",
+                        "output": "PARITY_BACKGROUND_OUTPUT",
+                        "exit_code": 0,
+                        "truncated": false
+                    },
+                    "will_wake": true,
+                }),
+            ),
+            update(
+                1_777_000_025,
+                id,
+                json!({
+                    "sessionUpdate": "turn_completed",
+                    "prompt_id": "prompt-parity",
+                    "stop_reason": "PARITY_END_TURN",
+                }),
+            ),
+            update(
+                1_777_000_026,
+                id,
+                json!({
+                    "sessionUpdate": "memory_session_saved",
+                    "path": "PARITY_MEMORY_PATH",
+                }),
+            ),
+            update(
+                1_777_000_027,
+                id,
+                json!({
+                    "sessionUpdate": "compaction_checkpoint",
+                    "checkpoint_file": "compaction_checkpoints/parity.json",
+                    "checkpoint_id": "PARITY_CHECKPOINT_ID",
+                }),
+            ),
+            update(
+                1_777_000_028,
+                id,
+                json!({
+                    "sessionUpdate": "auto_compact_completed",
+                    "tokens_before": 1000,
+                    "tokens_after": 400,
+                    "summary_preview": "PARITY_COMPACTION_PREVIEW",
+                }),
+            ),
+            update(
+                1_777_000_029,
+                id,
+                json!({"sessionUpdate": "memory_flush_started"}),
+            ),
+            update(
+                1_777_000_030,
+                id,
+                json!({
+                    "sessionUpdate": "last_turn_summary",
+                    "summary": "PARITY_TRANSIENT_TURN_SUMMARY",
+                    "prompt_id": "prompt-parity",
+                }),
+            ),
+            update(
+                1_777_000_031,
+                id,
+                json!({
+                    "sessionUpdate": "session_summary_generated",
+                    "session_summary": "PARITY_GENERATED_TITLE",
+                }),
+            ),
+            update(
+                1_777_000_032,
+                id,
+                json!({
+                    "sessionUpdate": "subagent_spawned",
+                    "subagent_id": "child-parity",
+                    "child_session_id": "child-parity",
+                    "parent_session_id": id,
+                    "subagent_type": "explore",
+                    "description": "PARITY_SUBAGENT_PROMPT",
+                }),
+            ),
+            update(
+                1_777_000_033,
+                id,
+                json!({
+                    "sessionUpdate": "scheduled_task_created",
+                    "task_id": "scheduled-parity",
+                    "prompt": "PARITY_SCHEDULED_PROMPT",
+                    "human_schedule": "tomorrow",
+                }),
+            ),
+            update(
+                1_777_000_034,
+                id,
+                json!({
+                    "sessionUpdate": "model_changed",
+                    "model_id": "PARITY_CHANGED_MODEL",
+                    "reasoning_effort": "high",
+                }),
+            ),
+            update(
+                1_777_000_035,
+                id,
+                json!({
+                    "sessionUpdate": "image_dropped",
+                    "notes": ["PARITY_DROPPED_IMAGE"],
+                }),
+            ),
+            update(
+                1_777_000_036,
+                id,
+                json!({
+                    "sessionUpdate": "diff_review",
+                    "content": [{
+                        "path": "src/parity.rs",
+                        "oldText": "old parity",
+                        "newText": "PARITY_DIFF_REVIEW"
+                    }],
+                }),
+            ),
+        ],
+    );
+    fs::create_dir_all(session_dir.join("compaction_checkpoints")).unwrap();
+    fs::write(
+        session_dir.join("compaction_checkpoints/parity.json"),
+        serde_json::to_vec(&json!({
+            "compacted_history": [{
+                "type": "user",
+                "synthetic_reason": "compaction_meta",
+                "content": [{
+                    "type": "text",
+                    "text": concat!(
+                        "This session is being continued from a previous conversation that ran out of context. ",
+                        "The summary below covers the earlier portion of the conversation.\n\n",
+                        "PARITY_FULL_COMPACTION_SUMMARY"
+                    )
+                }]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    for (pattern, target) in [
+        ("PARITY_PLAN_MARKER", "progress.plan"),
+        ("PARITY_HOOK_OUTPUT", "progress.hook_execution"),
+        ("PARITY_RETRY_REASON", "progress.retry_state"),
+        ("PARITY_BACKGROUND_START", "progress.task_backgrounded"),
+        ("PARITY_BACKGROUND_OUTPUT", "bash-output.background_task"),
+        ("PARITY_END_TURN", "system.turn_completed"),
+        ("PARITY_MEMORY_PATH", "progress.memory_session_saved"),
+        ("PARITY_CHECKPOINT_ID", "progress.compaction_checkpoint"),
+        (
+            "PARITY_COMPACTION_PREVIEW",
+            "progress.auto_compact_completed",
+        ),
+        ("PARITY_FULL_COMPACTION_SUMMARY", "compact-summary"),
+        ("memory flush started", "progress.memory_flush_started"),
+        ("PARITY_TRANSIENT_TURN_SUMMARY", "system.last_turn_summary"),
+        ("PARITY_GENERATED_TITLE", "ai-title"),
+        ("PARITY_SUBAGENT_PROMPT", "subagent-prompt"),
+        (
+            "PARITY_SCHEDULED_PROMPT",
+            "queue-operation.scheduled_task_created",
+        ),
+        ("PARITY_CHANGED_MODEL", "mode"),
+        ("PARITY_DROPPED_IMAGE", "attachment.image_dropped"),
+        ("PARITY_DIFF_REVIEW", "tool-use.diff_review"),
+    ] {
+        let output = world
+            .cmd()
+            .args(["search", pattern, "-t", target])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && stdout(&output).contains(pattern),
+            "[{target}] stdout: {} stderr: {}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn formats_multimodal_content_and_structured_tool_results() {
+    let world = GrokWorld::new();
+    let id = "grok-content";
+    world.add_session(
+        id,
+        "Content test",
+        false,
+        None,
+        "2026-08-20T12:00:30Z",
+        &[
+            update(
+                1_777_000_030,
+                id,
+                json!({
+                    "sessionUpdate": "user_message_chunk",
+                    "content": [
+                        {"type": "text", "text": "PARITY_MULTIMODAL_PROMPT"},
+                        {"type": "image", "mimeType": "image/png", "data": "aGVsbG8="},
+                        {"type": "audio", "mimeType": "audio/wav", "data": "aGk="}
+                    ],
+                }),
+            ),
+            update(
+                1_777_000_031,
+                id,
+                json!({
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": [{
+                        "type": "resource_link",
+                        "name": "PARITY_RESOURCE_NAME",
+                        "uri": "file:///repo/parity.txt",
+                        "description": "PARITY_RESOURCE_DESCRIPTION"
+                    }],
+                }),
+            ),
+            update(
+                1_777_000_032,
+                id,
+                json!({
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call-structured",
+                    "title": "search_replace",
+                    "rawInput": {"file_path": "src/lib.rs", "old_string": "old", "new_string": "new"},
+                    "_meta": {"x.ai/tool": {"name": "search_replace", "kind": "edit"}},
+                }),
+            ),
+            update(
+                1_777_000_033,
+                id,
+                json!({
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-structured",
+                    "status": "failed",
+                    "rawOutput": {"type": "SearchReplace", "NoMatchesFound": "PARITY_STRUCTURED_TOOL_ERROR"},
+                }),
+            ),
+        ],
+    );
+
+    for (pattern, target, expected) in [
+        ("image/png", "user", "[image: image/png, 5 bytes]"),
+        (
+            "PARITY_RESOURCE_NAME",
+            "assistant",
+            "file:///repo/parity.txt",
+        ),
+        (
+            "PARITY_STRUCTURED_TOOL_ERROR",
+            "tool-result.search_replace",
+            "PARITY_STRUCTURED_TOOL_ERROR",
+        ),
+    ] {
+        let output = world
+            .cmd()
+            .args(["search", pattern, "-t", target])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && stdout(&output).contains(expected),
+            "[{target}] stdout: {} stderr: {}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn maps_grok_summary_metadata() {
+    let world = GrokWorld::new();
+    world.add_session(
+        "grok-metadata",
+        "Metadata test",
+        false,
+        None,
+        "2026-08-20T12:00:40Z",
+        &[],
+    );
+    world.add_summary_fields(
+        "grok-metadata",
+        json!({
+            "agent_name": "PARITY_AGENT_NAME",
+            "current_model_id": "PARITY_MODEL_ID",
+            "reasoning_effort": "PARITY_REASONING_EFFORT",
+            "sandbox_profile": "PARITY_SANDBOX_PROFILE",
+            "last_turn_summary": "PARITY_LAST_TURN_SUMMARY",
+        }),
+    );
+
+    for (pattern, target) in [
+        ("PARITY_AGENT_NAME", "agent-name"),
+        ("PARITY_MODEL_ID", "system.model"),
+        ("PARITY_REASONING_EFFORT", "system.reasoning_effort"),
+        ("PARITY_SANDBOX_PROFILE", "permission-mode"),
+        ("PARITY_LAST_TURN_SUMMARY", "system.last_turn_summary"),
+    ] {
+        let output = world
+            .cmd()
+            .args(["search", pattern, "-t", target])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success() && stdout(&output).contains(pattern),
+            "[{target}] stdout: {} stderr: {}",
+            stdout(&output),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn discovers_projects_titles_and_subagents() {
     let world = GrokWorld::new();
     seed_full(&world);
@@ -346,6 +734,23 @@ fn searches_grok_rules_and_native_memory() {
         "project grok rule marker\n",
     )
     .unwrap();
+    fs::create_dir_all(world.home.path().join(".claude/rules")).unwrap();
+    fs::write(
+        world.home.path().join(".claude/CLAUDE.md"),
+        "global claude compatibility marker\n",
+    )
+    .unwrap();
+    fs::write(
+        world.home.path().join(".claude/rules/global.md"),
+        "global claude rules marker\n",
+    )
+    .unwrap();
+    fs::create_dir_all(world.home.path().join(".cursor/rules")).unwrap();
+    fs::write(
+        world.home.path().join(".cursor/rules/global.md"),
+        "global cursor rules marker\n",
+    )
+    .unwrap();
     fs::create_dir_all(world.home.path().join("rules")).unwrap();
     fs::write(
         world.home.path().join("rules/global.md"),
@@ -356,6 +761,39 @@ fn searches_grok_rules_and_native_memory() {
     fs::write(
         world.project.path().join(".grok/rules/project.md"),
         "project grok rules directory marker\n",
+    )
+    .unwrap();
+    fs::write(
+        world.project.path().join(".grok/rules/ignored.md"),
+        "ignored grok rule marker\n",
+    )
+    .unwrap();
+    fs::create_dir_all(world.project.path().join(".claude/rules")).unwrap();
+    fs::write(
+        world.project.path().join(".claude/CLAUDE.local.md"),
+        "project claude compatibility marker\n",
+    )
+    .unwrap();
+    fs::write(
+        world.project.path().join(".claude/rules/project.md"),
+        "project claude rules marker\n",
+    )
+    .unwrap();
+    fs::create_dir_all(world.project.path().join(".cursor/rules")).unwrap();
+    fs::write(
+        world.project.path().join(".cursor/rules/project.md"),
+        "project cursor rules marker\n",
+    )
+    .unwrap();
+    fs::create_dir_all(world.project.path().join("src")).unwrap();
+    fs::write(
+        world.project.path().join("src/AGENTS.md"),
+        "nested grok instruction marker\n",
+    )
+    .unwrap();
+    fs::write(
+        world.project.path().join(".gitignore"),
+        ".grok/rules/ignored.md\n",
     )
     .unwrap();
 
@@ -383,6 +821,12 @@ fn searches_grok_rules_and_native_memory() {
         "project grok rule",
         "global grok rules directory",
         "project grok rules directory",
+        "global claude compatibility",
+        "global claude rules",
+        "global cursor rules",
+        "project claude compatibility",
+        "project claude rules",
+        "project cursor rules",
         "global grok memory",
         "workspace grok memory",
         "session grok memory",
@@ -403,6 +847,30 @@ fn searches_grok_rules_and_native_memory() {
             stdout(&output)
         );
     }
+
+    let nested = world
+        .cmd()
+        .args(["memory", "search", "nested grok instruction"])
+        .output()
+        .unwrap();
+    assert!(stdout(&nested).contains("nested grok instruction marker"));
+    let nested_disabled = world
+        .cmd()
+        .args([
+            "memory",
+            "search",
+            "nested grok instruction",
+            "--no-subdirs",
+        ])
+        .output()
+        .unwrap();
+    assert!(!stdout(&nested_disabled).contains("nested grok instruction marker"));
+    let ignored = world
+        .cmd()
+        .args(["memory", "search", "ignored grok rule"])
+        .output()
+        .unwrap();
+    assert!(!stdout(&ignored).contains("ignored grok rule marker"));
 }
 
 #[test]
@@ -437,6 +905,65 @@ fn auto_backend_detects_explicit_grok_home() {
 }
 
 #[test]
+fn reports_malformed_and_unknown_updates_without_losing_valid_records() {
+    let world = GrokWorld::new();
+    let session_dir = world.add_session(
+        "grok-diagnostics",
+        "Diagnostics test",
+        false,
+        None,
+        "2026-08-20T12:00:50Z",
+        &[update(
+            1_777_000_050,
+            "grok-diagnostics",
+            json!({
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "PARITY_VALID_AFTER_DIAGNOSTIC"},
+            }),
+        )],
+    );
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(session_dir.join("updates.jsonl"))
+        .unwrap();
+    writeln!(file, "{{not valid json").unwrap();
+    for timestamp in [1_777_000_051, 1_777_000_052] {
+        writeln!(
+            file,
+            "{}",
+            update(
+                timestamp,
+                "grok-diagnostics",
+                json!({
+                    "sessionUpdate": "future_parity_event",
+                    "payload": "PARITY_UNKNOWN_PAYLOAD",
+                }),
+            )
+        )
+        .unwrap();
+    }
+    drop(file);
+
+    let output = world
+        .cmd()
+        .args(["dump", "grok-diagnostics", "-t", "all"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("PARITY_VALID_AFTER_DIAGNOSTIC"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("updates.jsonl: line 2"), "{stderr}");
+    assert!(stderr.contains("future_parity_event"), "{stderr}");
+    assert_eq!(
+        stderr
+            .matches("skipping unrecognized Grok session update")
+            .count(),
+        1,
+        "{stderr}"
+    );
+}
+
+#[test]
 fn tail_follow_reads_appended_grok_updates() {
     let world = GrokWorld::new();
     let session_dir = world.add_session(
@@ -467,23 +994,30 @@ fn tail_follow_reads_appended_grok_updates() {
         .append(true)
         .open(session_dir.join("updates.jsonl"))
         .unwrap();
-    writeln!(
-        file,
-        "{}",
-        update(
-            1_777_100_001,
-            "grok-follow",
-            json!({
-                "sessionUpdate": "agent_message_chunk",
-                "content": {"type": "text", "text": "GROK_FOLLOW_APPENDED"},
-            }),
-        )
-    )
+    writeln!(file, "{{malformed completed update").unwrap();
+    file.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(250));
+    let appended = serde_json::to_string(&update(
+        1_777_100_001,
+        "grok-follow",
+        json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "GROK_FOLLOW_APPENDED"},
+        }),
+    ))
     .unwrap();
+    let midpoint = appended.len() / 2;
+    file.write_all(&appended.as_bytes()[..midpoint]).unwrap();
+    file.flush().unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    file.write_all(&appended.as_bytes()[midpoint..]).unwrap();
+    file.write_all(b"\n").unwrap();
+    file.flush().unwrap();
     drop(file);
     std::thread::sleep(Duration::from_millis(500));
 
     child.kill().unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(stdout(&output).contains("GROK_FOLLOW_APPENDED"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("malformed appended Grok update"));
 }

@@ -19,6 +19,7 @@ console = "0.15"
 libc = "0.2.183"
 rusqlite = { version = "0.32", features = ["bundled"] }
 blake3 = "1.8.7"
+ignore = "0.4.33"
 
 [dev-dependencies]
 tempfile = "3"

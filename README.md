@@ -52,8 +52,9 @@ Commands:
 **Content-type coverage.** The `-t/--targets` filters work uniformly, but backends differ in what they can populate:
 
 - Codex populates `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `subagent-prompt`, and `compact-summary`. Calls/results are correlated by call ID, wrapped shell/apply-patch calls are normalized to their underlying tool, and direct edit calls use the shared unified-diff renderer. Developer/system context and encrypted reasoning payloads are intentionally not exposed.
-- Claude, Grok, and opencode populate `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, and `compact-summary`. Grok maps its durable `session_recap` prose to `compact-summary`.
-- Claude-only transcript telemetry (`system`, `attachment`, `progress`, `file-history-snapshot`, `file-history-delta`, `queue-operation`, `pull-request`, `bridge-session`, `mode`, and the metadata types) stays empty for the other backends.
+- Claude, Grok, and opencode populate `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, and `compact-summary`. Grok searches both recap prose and the complete summary stored by compaction checkpoints; background-task completions are surfaced as final tool or shell output.
+- Grok also maps its native plans, hooks, retries, memory/compaction lifecycle, tasks, subagents, scheduled tasks, image events, model changes, turn metadata, titles, agent name, and sandbox profile to `progress`, `system`, `attachment`, `queue-operation`, `mode`, `subagent-prompt`, `ai-title`, `agent-name`, and `permission-mode` as appropriate. Unknown future update kinds and malformed offline records produce path-specific warnings instead of disappearing silently.
+- Grok does not synthesize Claude-only data that its store does not have: `file-history-snapshot`, `file-history-delta`, `pull-request`, and `bridge-session` remain empty.
 - opencode `edit` calls and Grok `search_replace` calls render as unified diffs exactly like Claude's, via the same `EditDiff` path.
 - Tool-name subtypes match case-insensitively. Native names remain available, so examples include `tool-use.bash` for opencode and `tool-use.run_terminal_command` for Grok.
 - opencode merges a tool call and its result into one record, but claugrep surfaces them as up to three separate records (`bash-command` + `tool-use` + `bash-output`) so a default search sees every facet — matching Claude's `tool_use`-block + `tool_result` shape.
@@ -65,7 +66,7 @@ Commands:
 - opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 - Grok sessions whose summary kind starts with `subagent` map to `subagent-prompt` / `--subagents`; ordinary forks remain top-level sessions.
 
-`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), Codex walks `AGENTS.md` plus every markdown resource in `$CODEX_HOME/memories`, Grok walks its supported project-rule names and `.grok/rules/*.md` plus global/workspace markdown under `$GROK_HOME/memory`, and opencode walks `AGENTS.md`. Codex emits `memory_summary.md` and `MEMORY.md` first, recursively includes rollout summaries, skills, and imported extension resources, and excludes the transient `phase2_workspace_diff.md` prompt artifact. Grok uses the same remote-based workspace identity as Grok Build, so clones and worktrees share the right native memory directory.
+`memory dump`/`memory search` honor the backend too: Claude walks `CLAUDE.md` (+ managed policy + auto-memory), Codex walks `AGENTS.md` plus every markdown resource in `$CODEX_HOME/memories`, Grok walks the same default-on rule surfaces as Grok Build (`Agents.md`, `Claude.md`, `CLAUDE.md`, `CLAUDE.local.md`, `AGENT.md`, `AGENTS.md`, Claude compatibility files, and direct markdown files in `.grok/rules`, `.claude/rules`, and `.cursor/rules`) plus global/workspace markdown under `$GROK_HOME/memory`, and opencode walks `AGENTS.md`. Project rules are loaded root-to-working-directory, honor repository and global Git ignore rules, and optionally include nested instructions. Codex emits `memory_summary.md` and `MEMORY.md` first, recursively includes rollout summaries, skills, and imported extension resources, and excludes the transient `phase2_workspace_diff.md` prompt artifact. Grok uses the same remote-based workspace identity as Grok Build, so clones and worktrees share the right native memory directory.
 
 ### Global options
 
@@ -341,6 +342,12 @@ claugrep --backend grok search "auth" -t user,assistant
 
 # Search Grok terminal commands and finalized output
 claugrep --backend grok search "cargo test" -t bash-command,bash-output
+
+# Search Grok plans, hooks, retries, and background-task lifecycle
+claugrep --backend grok search "release" -t progress
+
+# Search complete Grok compaction summaries
+claugrep --backend grok search "earlier decision" -t compact-summary
 
 # Search Grok's project rules and native memory
 claugrep --backend grok memory search "release checklist"
