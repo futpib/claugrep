@@ -238,7 +238,7 @@ pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<Proje
         let mut projects: Vec<ProjectInfo> = entries
             .flatten()
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .filter_map(|e| {
+            .map(|e| {
                 let encoded = e.file_name().to_string_lossy().to_string();
                 let dir = projects_root.join(&encoded);
 
@@ -263,7 +263,7 @@ pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<Proje
 
                 let (decoded, verified) = try_verify_decoded_path(&encoded);
 
-                Some(ProjectInfo {
+                ProjectInfo {
                     encoded_path: encoded,
                     decoded_path: decoded,
                     verified,
@@ -271,7 +271,7 @@ pub fn discover_projects(config_dirs: &[(Option<String>, PathBuf)]) -> Vec<Proje
                     latest_mtime,
                     account: account.clone(),
                     backend: CLAUDE,
-                })
+                }
             })
             .collect();
 
@@ -342,7 +342,7 @@ pub fn discover_sessions(project_path: &str, specific_session: Option<&str>, con
 
     // Sort newest first
     let mut sorted = jsonl_files;
-    sorted.sort_by(|a, b| b.2.cmp(&a.2));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.2));
 
     let mut result = vec![];
     for (sid, path, mtime) in &sorted {

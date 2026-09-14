@@ -584,7 +584,7 @@ mod tests {
 
         // Force colors on (simulates TTY)
         console::set_colors_enabled(true);
-        let colored = format_diff(&m, m.edit_diff.as_ref().unwrap(), &[pat.clone()], 200, 3);
+        let colored = format_diff(&m, m.edit_diff.as_ref().unwrap(), std::slice::from_ref(&pat), 200, 3);
         assert!(colored.contains("\x1b["), "should have ANSI codes with colors enabled");
 
         // Force colors off (simulates piped output)

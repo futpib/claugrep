@@ -536,7 +536,7 @@ fn parse_since_date(value: &str) -> Result<chrono::DateTime<chrono::Utc>, String
             if date.weekday() == wd {
                 return Ok(date_to_dt(date));
             }
-            date = date - Duration::days(1);
+            date -= Duration::days(1);
         }
     }
 
@@ -578,9 +578,9 @@ fn filter_sessions_before(
     }
 }
 
-fn resolve_project(path: &PathBuf) -> String {
+fn resolve_project(path: &Path) -> String {
     path.canonicalize()
-        .unwrap_or_else(|_| path.clone())
+        .unwrap_or_else(|_| path.to_path_buf())
         .to_string_lossy()
         .to_string()
 }
@@ -617,7 +617,7 @@ fn select_project_scope(
     source: &dyn Source,
 ) -> Result<ProjectScope, String> {
     if !all_projects && project_regexp.is_empty() {
-        return Ok(ProjectScope::Single(resolve_project(&project.to_path_buf())));
+        return Ok(ProjectScope::Single(resolve_project(project)));
     }
     let mut compiled: Vec<Regex> = vec![];
     for p in project_regexp {
@@ -1148,10 +1148,9 @@ fn main() {
                     let (count, hit_cap) = search_sessions(source, &resolved, &proj_options, |m| {
                         if !first_in_proj { project_lines.push(String::new()); }
                         first_in_proj = false;
-                        let rendered = if !no_diff && m.edit_diff.is_some() {
-                            format_diff(&m, m.edit_diff.as_ref().unwrap(), &patterns, max_line_width, diff_ctx)
-                        } else {
-                            format_match(&m, &patterns, max_line_width)
+                        let rendered = match (&m.edit_diff, no_diff) {
+                            (Some(diff), false) => format_diff(&m, diff, &patterns, max_line_width, diff_ctx),
+                            _ => format_match(&m, &patterns, max_line_width),
                         };
                         project_lines.push(rendered);
                     });

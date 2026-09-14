@@ -922,8 +922,6 @@ fn format_tool_input(input: &serde_json::Value) -> String {
             } else {
                 lines.push(format!("{}: {}", key, s));
             }
-        } else if value.is_number() || value.is_boolean() {
-            lines.push(format!("{}: {}", key, value));
         } else if !value.is_null() {
             lines.push(format!("{}: {}", key, value));
         }
@@ -931,6 +929,7 @@ fn format_tool_input(input: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn extract_progress(
     entry: &serde_json::Value,
     tool_use_map: &ToolUseMap,

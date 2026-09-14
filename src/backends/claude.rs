@@ -55,7 +55,7 @@ impl Source for ClaudeSource {
                 }
             }
         }
-        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        all.sort_by_key(|a| std::cmp::Reverse(a.mtime));
         all
     }
 

@@ -1,8 +1,8 @@
-/// Integration tests against real Claude session transcripts in ~/.claude/projects/.
-///
-/// These tests run the `claugrep` binary and verify end-to-end behaviour.
-/// They require actual Claude Code transcript data to be present; in clean
-/// environments without transcripts the tests skip gracefully.
+//! Integration tests against real Claude session transcripts in ~/.claude/projects/.
+//!
+//! These tests run the `claugrep` binary and verify end-to-end behaviour.
+//! They require actual Claude Code transcript data to be present; in clean
+//! environments without transcripts the tests skip gracefully.
 
 use std::path::PathBuf;
 use std::process::Command;

@@ -147,7 +147,7 @@ impl Source for MultiSource {
             .iter()
             .flat_map(|c| c.discover_sessions(project_path))
             .collect();
-        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        all.sort_by_key(|a| std::cmp::Reverse(a.mtime));
         all
     }
 

@@ -264,7 +264,7 @@ fn find_subdir_md(root: &Path, filenames: &[&str]) -> Vec<PathBuf> {
                 stack.push(path);
             } else if ft.is_file() {
                 let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
-                if filenames.iter().any(|want| *want == fname)
+                if filenames.contains(&fname)
                     && path.parent() != Some(root)
                 {
                     out.push(path);

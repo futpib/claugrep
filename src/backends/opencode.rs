@@ -46,7 +46,7 @@ impl OpenCodeSource {
             .ok()
             .map(PathBuf::from)
             .or_else(|| dirs::home_dir().map(|h| h.join(".local/share")))
-            .or_else(|| dirs::data_dir())?;
+            .or_else(dirs::data_dir)?;
         let db = base.join("opencode").join("opencode.db");
         if db.is_file() { Some(db) } else { None }
     }
@@ -62,7 +62,7 @@ fn opencode_config_dir() -> PathBuf {
     std::env::var("XDG_CONFIG_HOME")
         .ok()
         .map(PathBuf::from)
-        .or_else(|| dirs::config_dir())
+        .or_else(dirs::config_dir)
         .unwrap_or_else(|| PathBuf::from("~/.config"))
         .join("opencode")
 }
@@ -153,7 +153,7 @@ impl Source for OpenCodeSource {
                 });
             }
         }
-        out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        out.sort_by_key(|a| std::cmp::Reverse(a.mtime));
         out
     }
 
@@ -324,6 +324,7 @@ fn poll_follow_once(
 ///
 /// `targets` is honored (early-filter) the same way the Claude extractor does,
 /// so callers searching a narrow target set don't pay for materializing the rest.
+#[allow(clippy::too_many_arguments)]
 fn part_records(
     data: &serde_json::Value,
     role: &str,
@@ -456,25 +457,23 @@ fn part_records(
                 }));
             }
         }
-        "compaction" => {
-            if targets.contains(&Target::CompactSummary) {
-                let tail = data["tail_start_id"].as_str().unwrap_or("");
-                let text = if tail.is_empty() {
-                    "(compaction boundary)".to_string()
-                } else {
-                    format!("(compaction boundary; resumes at {})", tail)
-                };
-                let ts = millis_to_iso(created_ms);
-                out.push(("compaction", ExtractedContent {
-                    target: Target::CompactSummary,
-                    text,
-                    tool_name: None,
-                    timestamp: ts.clone(),
-                    session_id: session_id.to_string(),
-                    edit_diff: None,
-                    raw_entry: finalize("compaction", &ts),
-                }));
-            }
+        "compaction" if targets.contains(&Target::CompactSummary) => {
+            let tail = data["tail_start_id"].as_str().unwrap_or("");
+            let text = if tail.is_empty() {
+                "(compaction boundary)".to_string()
+            } else {
+                format!("(compaction boundary; resumes at {})", tail)
+            };
+            let ts = millis_to_iso(created_ms);
+            out.push(("compaction", ExtractedContent {
+                target: Target::CompactSummary,
+                text,
+                tool_name: None,
+                timestamp: ts.clone(),
+                session_id: session_id.to_string(),
+                edit_diff: None,
+                raw_entry: finalize("compaction", &ts),
+            }));
         }
         // step-start / step-finish / patch are step-boundary / snapshot markers
         // with no searchable prose; skip them.
@@ -505,8 +504,6 @@ fn format_tool_input(input: &serde_json::Value) -> String {
             } else {
                 lines.push(format!("{}: {}", key, s));
             }
-        } else if value.is_number() || value.is_boolean() {
-            lines.push(format!("{}: {}", key, value));
         } else if !value.is_null() {
             lines.push(format!("{}: {}", key, value));
         }
