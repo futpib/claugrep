@@ -450,6 +450,47 @@ impl SessionBuilder {
         self
     }
 
+    /// Write an atis-latch record (opaque per-session latch token).
+    fn atis_latch(mut self, atis: &str) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "atis-latch",
+            "atis": atis,
+            "sessionId": sid,
+        }));
+        self
+    }
+
+    /// Write a cost-state record (session cost/usage rollup).
+    fn cost_state(mut self, model: &str, total_cost_usd: f64) -> Self {
+        let sid = self.session_id.clone();
+        self.write(serde_json::json!({
+            "type": "cost-state",
+            "sessionId": sid,
+            "totalCostUSD": total_cost_usd,
+            "totalAPIDuration": 3615,
+            "totalAPIDurationWithoutRetries": 3553,
+            "totalToolDuration": 0,
+            "totalLinesAdded": 0,
+            "totalLinesRemoved": 0,
+            "totalDuration": 158326,
+            "startTime": 1789392127710i64,
+            "modelUsage": {
+                model: {
+                    "inputTokens": 2,
+                    "outputTokens": 5,
+                    "thinkingTokens": 0,
+                    "cacheReadInputTokens": 33341,
+                    "cacheCreationInputTokens": 12329,
+                    "webSearchRequests": 0,
+                    "costUSD": total_cost_usd,
+                }
+            },
+            "hasUnknownModelCost": false,
+        }));
+        self
+    }
+
     /// Write an empty attachment record with the given inner type.
     /// Used for the "not warned" tests — the record has no searchable content,
     /// but should still be recognized and silently consumed.
@@ -3772,6 +3813,27 @@ fn test_bridge_session_not_warned() {
 }
 
 #[test]
+fn test_atis_latch_and_cost_state_not_warned() {
+    let world = MockWorld::new();
+    let proj = world.project("atis-cost-nowarn");
+    proj.session("sess-atiscost")
+        .atis_latch("5ddd0466fd524dad")
+        .cost_state("claude-opus-5[1m]", 0.14)
+        .user_message("hello")
+        .done();
+
+    let out = world
+        .cmd()
+        .args(["dump", "0", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("warning: skipping unrecognized record"),
+        "atis-latch / cost-state records should not trigger unrecognized record warnings, got: {}", err);
+}
+
+#[test]
 fn test_mode_not_warned() {
     let world = MockWorld::new();
     let proj = world.project("mode-nowarn");
@@ -4054,6 +4116,64 @@ fn test_search_mode() {
         .unwrap();
     assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
         "mode records should not appear in default targets");
+}
+
+#[test]
+fn test_search_cost_state() {
+    let world = MockWorld::new();
+    let proj = world.project("cost-search");
+    proj.session("sess-costs")
+        .user_message("hello")
+        .cost_state("UNIQUE_COST_MODEL_XYZ", 0.42)
+        .assistant_message("hi")
+        .done();
+
+    // -t cost-state finds the record
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_COST_MODEL_XYZ", "-t", "cost-state", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    let text = strip_ansi(stdout(&found));
+    assert!(!text.contains("No matches found"), "-t cost-state should find cost-state records");
+    assert!(text.contains("cost=$0.4200"), "should render the per-model cost, got: {}", text);
+
+    // default targets should NOT find cost-state records
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_COST_MODEL_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "cost-state records should not appear in default targets");
+}
+
+#[test]
+fn test_search_atis_latch() {
+    let world = MockWorld::new();
+    let proj = world.project("atis-search");
+    proj.session("sess-atiss")
+        .user_message("hello")
+        .atis_latch("UNIQUE_ATIS_XYZ")
+        .done();
+
+    let found = world
+        .cmd()
+        .args(["search", "UNIQUE_ATIS_XYZ", "-t", "atis-latch", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(found.status.success());
+    assert!(!strip_ansi(stdout(&found)).contains("No matches found"),
+        "-t atis-latch should find atis-latch records");
+
+    let miss = world
+        .cmd()
+        .args(["search", "UNIQUE_ATIS_XYZ", "--project", proj.path()])
+        .output()
+        .unwrap();
+    assert!(strip_ansi(stdout(&miss)).contains("No matches found"),
+        "atis-latch records should not appear in default targets");
 }
 
 #[test]

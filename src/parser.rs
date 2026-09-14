@@ -30,6 +30,8 @@ pub enum Target {
     PullRequest,
     BridgeSession,
     Mode,
+    AtisLatch,
+    CostState,
 }
 
 /// CLI/display name for a target. Paired with `FromStr` below — these two
@@ -60,6 +62,8 @@ impl fmt::Display for Target {
             Target::PullRequest => "pull-request",
             Target::BridgeSession => "bridge-session",
             Target::Mode => "mode",
+            Target::AtisLatch => "atis-latch",
+            Target::CostState => "cost-state",
         })
     }
 }
@@ -91,6 +95,8 @@ impl FromStr for Target {
             "pull-request" => Target::PullRequest,
             "bridge-session" => Target::BridgeSession,
             "mode" => Target::Mode,
+            "atis-latch" => Target::AtisLatch,
+            "cost-state" => Target::CostState,
             _ => return Err(()),
         })
     }
@@ -125,7 +131,9 @@ impl Target {
             | Target::AiTitle
             | Target::PermissionMode
             | Target::BridgeSession
-            | Target::Mode => false,
+            | Target::Mode
+            | Target::AtisLatch
+            | Target::CostState => false,
         }
     }
 }
@@ -563,6 +571,38 @@ pub fn extract_from_entry(
                 });
             }
         }
+        Some("atis-latch") => {
+            // Opaque per-session latch token — `{"type":"atis-latch","atis":"<hex>",...}`.
+            // Rewritten on every turn; carries no human-authored text.
+            if targets.contains(&Target::AtisLatch) {
+                let atis = entry["atis"].as_str().unwrap_or("");
+                out.push(ExtractedContent {
+                    target: Target::AtisLatch,
+                    text: atis.to_string(),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
+        Some("cost-state") => {
+            // Session cost/usage rollup — total USD, wall/API durations, lines
+            // changed, and a per-model token breakdown. Rendered as one line per
+            // metric so `-t cost-state` output is greppable.
+            if targets.contains(&Target::CostState) {
+                out.push(ExtractedContent {
+                    target: Target::CostState,
+                    text: format_cost_state(entry),
+                    tool_name: None,
+                    timestamp: timestamp.to_string(),
+                    session_id: entry_session.to_string(),
+                    edit_diff: None,
+                    raw_entry: None,
+                });
+            }
+        }
         Some("attachment") => {
             if targets.contains(&Target::Attachment) {
                 if let Some(text) = format_attachment(&entry["attachment"]) {
@@ -613,6 +653,43 @@ pub fn extract_from_entry(
             eprintln!("warning: skipping unrecognized record: {}{}", preview, ellipsis);
         }
     }
+}
+
+/// Render a `cost-state` record as `key: value` lines: the session totals
+/// first, then one line per model with its token counts and cost.
+fn format_cost_state(entry: &serde_json::Value) -> String {
+    let mut lines = vec![];
+    if let Some(cost) = entry["totalCostUSD"].as_f64() {
+        lines.push(format!("total cost: ${:.4}", cost));
+    }
+    for (label, key) in [
+        ("total duration", "totalDuration"),
+        ("api duration", "totalAPIDuration"),
+        ("tool duration", "totalToolDuration"),
+    ] {
+        if let Some(ms) = entry[key].as_f64() {
+            lines.push(format!("{}: {:.1}s", label, ms / 1000.0));
+        }
+    }
+    if let (Some(added), Some(removed)) = (entry["totalLinesAdded"].as_u64(), entry["totalLinesRemoved"].as_u64()) {
+        lines.push(format!("lines: +{} -{}", added, removed));
+    }
+    if let Some(models) = entry["modelUsage"].as_object() {
+        for (model, usage) in models {
+            let n = |k: &str| usage[k].as_u64().unwrap_or(0);
+            lines.push(format!(
+                "{}: in={} out={} think={} cache_read={} cache_create={} cost=${:.4}",
+                model,
+                n("inputTokens"),
+                n("outputTokens"),
+                n("thinkingTokens"),
+                n("cacheReadInputTokens"),
+                n("cacheCreationInputTokens"),
+                usage["costUSD"].as_f64().unwrap_or(0.0),
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 fn extract_user(
@@ -1161,6 +1238,7 @@ mod tests {
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
             Target::PullRequest, Target::BridgeSession, Target::Mode,
+            Target::AtisLatch, Target::CostState,
         ].into_iter().collect()
     }
 
@@ -1452,6 +1530,42 @@ mod tests {
         // Without Mode in targets, the record should be silently skipped.
         let f = write_jsonl(&[
             r#"{"type":"mode","mode":"normal","sessionId":"s"}"#,
+        ]);
+        let targets: HashSet<Target> = [Target::User].into_iter().collect();
+        let contents = extract_content(f.path(), &targets, "s", false);
+        assert_eq!(contents.len(), 0);
+    }
+
+    #[test]
+    fn test_extract_atis_latch() {
+        let f = write_jsonl(&[
+            r#"{"type":"atis-latch","atis":"5ddd0466fd524dad","sessionId":"s"}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let m = contents.iter().find(|c| c.target == Target::AtisLatch);
+        assert!(m.is_some(), "should extract atis-latch record");
+        assert_eq!(m.unwrap().text, "5ddd0466fd524dad");
+    }
+
+    #[test]
+    fn test_extract_cost_state() {
+        let f = write_jsonl(&[
+            r#"{"type":"cost-state","sessionId":"s","totalCostUSD":0.1420245,"totalAPIDuration":3615,"totalToolDuration":0,"totalLinesAdded":3,"totalLinesRemoved":1,"totalDuration":158326,"startTime":1789392127710,"modelUsage":{"claude-opus-5[1m]":{"inputTokens":2,"outputTokens":5,"thinkingTokens":0,"cacheReadInputTokens":33341,"cacheCreationInputTokens":12329,"webSearchRequests":0,"costUSD":0.1400955}},"hasUnknownModelCost":false}"#,
+        ]);
+        let contents = extract_content(f.path(), &all_targets(), "s", false);
+        let m = contents.iter().find(|c| c.target == Target::CostState).expect("should extract cost-state record");
+        assert_eq!(
+            m.text,
+            "total cost: $0.1420\ntotal duration: 158.3s\napi duration: 3.6s\ntool duration: 0.0s\nlines: +3 -1\n\
+             claude-opus-5[1m]: in=2 out=5 think=0 cache_read=33341 cache_create=12329 cost=$0.1401"
+        );
+    }
+
+    #[test]
+    fn test_atis_latch_and_cost_state_target_filtering() {
+        let f = write_jsonl(&[
+            r#"{"type":"atis-latch","atis":"abc","sessionId":"s"}"#,
+            r#"{"type":"cost-state","sessionId":"s","totalCostUSD":0.1,"modelUsage":{}}"#,
         ]);
         let targets: HashSet<Target> = [Target::User].into_iter().collect();
         let contents = extract_content(f.path(), &targets, "s", false);
@@ -1832,6 +1946,7 @@ mod tests {
             Target::LastPrompt, Target::AgentName, Target::CustomTitle, Target::AiTitle,
             Target::PermissionMode, Target::Attachment, Target::Progress,
             Target::PullRequest, Target::BridgeSession, Target::Mode,
+            Target::AtisLatch, Target::CostState,
         ] {
             let s = t.to_string();
             let parsed: Target = s.parse().unwrap_or_else(|_| panic!("failed to parse {}", s));
