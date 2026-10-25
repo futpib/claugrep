@@ -1,6 +1,6 @@
 //! opencode backend: reads the SQLite transcript store at
 //! `~/.local/share/opencode/opencode.db` (event-sourced; `session` / `message`
-//! / `part` tables).
+//! / `part` tables in v1; `session_v2` / `session_message` in v2).
 //!
 //! opencode's content model differs from Claude's in two ways, both of which
 //! make our job easier:
@@ -29,10 +29,38 @@ use crate::parser::{EditDiff, ExtractedContent, Target};
 use crate::sessions::{get_worktree_paths, ProjectInfo, SessionFile};
 use crate::source::Source;
 
+mod v2;
+
 pub const OPENCODE: &str = "opencode";
 
 pub struct OpenCodeSource {
     pub db_path: PathBuf,
+}
+
+fn has_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name], |row| row.get(0))
+}
+
+/// Migration retains the old tables. A v2 session owns its ID, including its
+/// directory and timestamps, so never also discover its stale v1 copy.
+fn session_query(conn: &Connection) -> rusqlite::Result<String> {
+    let v1 = has_table(conn, "session")?;
+    let v2 = has_table(conn, "session_v2")?;
+    let columns = "id, directory, parent_id, time_updated";
+    Ok(match (v1, v2) {
+        (true, true) => format!("SELECT {columns} FROM session_v2 UNION ALL \
+            SELECT {columns} FROM session WHERE NOT EXISTS \
+            (SELECT 1 FROM session_v2 WHERE session_v2.id=session.id)"),
+        (false, true) => format!("SELECT {columns} FROM session_v2"),
+        _ => format!("SELECT {columns} FROM session"),
+    })
+}
+
+fn is_v2(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {
+    if !has_table(conn, "session_v2")? { return Ok(false); }
+    conn.query_row("SELECT EXISTS(SELECT 1 FROM session_v2 WHERE id=?1)",
+        [session_id], |row| row.get(0))
 }
 
 impl OpenCodeSource {
@@ -77,10 +105,10 @@ impl Source for OpenCodeSource {
             Ok(c) => c,
             Err(e) => { eprintln!("warning: {}", e); return vec![]; }
         };
-        let mut stmt = match conn.prepare(
+        let mut stmt = match session_query(&conn).and_then(|sessions| conn.prepare(&format!(
             "SELECT directory, COUNT(*), MAX(time_updated) \
-             FROM session GROUP BY directory ORDER BY MAX(time_updated) DESC",
-        ) {
+             FROM ({sessions}) GROUP BY directory ORDER BY MAX(time_updated) DESC",
+        ))) {
             Ok(s) => s,
             Err(e) => { eprintln!("warning: opencode projects query failed: {}", e); return vec![]; }
         };
@@ -126,10 +154,10 @@ impl Source for OpenCodeSource {
         // Prepare once; query_map per directory. The statement must outlive each
         // row iterator, so it lives in this scope and we consume each iterator
         // before the next directory.
-        let mut stmt = match conn.prepare(
+        let mut stmt = match session_query(&conn).and_then(|sessions| conn.prepare(&format!(
             "SELECT id, parent_id IS NOT NULL, time_updated \
-             FROM session WHERE directory = ?1 ORDER BY time_updated DESC",
-        ) {
+             FROM ({sessions}) WHERE directory = ?1 ORDER BY time_updated DESC",
+        ))) {
             Ok(s) => s,
             Err(e) => { eprintln!("warning: opencode sessions query failed: {}", e); return out; }
         };
@@ -167,6 +195,14 @@ impl Source for OpenCodeSource {
             Ok(c) => c,
             Err(e) => { eprintln!("warning: {}", e); return vec![]; }
         };
+        match is_v2(&conn, &session.session_id) {
+            Ok(true) => return v2::extract(&conn, session, targets, keep_raw).unwrap_or_else(|e| {
+                eprintln!("warning: opencode v2 session {}: {}", session.session_id, e);
+                vec![]
+            }),
+            Ok(false) => {},
+            Err(e) => { eprintln!("warning: opencode schema query failed: {}", e); return vec![]; }
+        }
         let mut stmt = match conn.prepare(
             "SELECT p.rowid, p.data, p.time_created, p.time_updated, \
                     json_extract(m.data,'$.role') \
@@ -208,6 +244,9 @@ impl Source for OpenCodeSource {
         on_records: &mut dyn FnMut(&[ExtractedContent]),
     ) -> Result<(), String> {
         let conn = self.open()?;
+        if is_v2(&conn, &session.session_id).map_err(|e| e.to_string())? {
+            return v2::follow(&conn, session, targets, on_records).map_err(|e| e.to_string());
+        }
         // Prepare once; the statement must outlive every row iterator we pull
         // from it across the polling loop.
         let mut stmt = conn.prepare(
@@ -248,6 +287,13 @@ impl Source for OpenCodeSource {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    fn session_title(&self, session: &SessionFile) -> Option<String> {
+        let conn = self.open().ok()?;
+        let table = if is_v2(&conn, &session.session_id).ok()? { "session_v2" } else { "session" };
+        conn.query_row(&format!("SELECT title FROM {table} WHERE id=?1"),
+            [&session.session_id], |row| row.get::<_, Option<String>>(0)).ok().flatten()
     }
 
     fn discover_memory_files(&self, cwd: &Path, include_subdirs: bool) -> Vec<MemoryFile> {

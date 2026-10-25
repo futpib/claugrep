@@ -45,9 +45,11 @@ Commands:
 | `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | `auto` or `--backend claude` |
 | `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions`; native memory under `$CODEX_HOME/memories` | auto-detected or `--backend codex`; override root with `--codex-home` |
 | `grok` | ACP `updates.jsonl` + `summary.json` under `$GROK_HOME/sessions`; native memory under `$GROK_HOME/memory` | auto-detected or `--backend grok`; override root with `--grok-home` |
-| `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db` (`session`/`message`/`part` tables) | auto-detected or `--backend opencode`; override path with `--opencode-db` |
+| `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db`: v1 `session`/`message`/`part`, v2 `session_v2`/`session_message` | auto-detected or `--backend opencode`; override path with `--opencode-db` |
 
 `auto` (the default) enables every backend whose store is present, so a single `claugrep search` spans all of them. `projects`/`sessions` listings annotate each row with its `[backend]` when more than one is active (and `[account]` for multi-account Claude).
+
+OpenCode 1 and 2 use the same `--backend opencode` option. Schema detection supports v1-only, v2-only, and migrated databases; when both versions contain a session ID, its v2 transcript and metadata take precedence. V2 messages are read in sequence order, including all assistant content blocks, synthetic prompts, tool calls/results, shell messages, and stored compaction summaries. `tail -f` emits completed text and results once per content block, including tools that finish after newer messages arrive. It waits for streamed text to finish before emitting that text.
 
 **Content-type coverage.** The `-t/--targets` filters work uniformly, but backends differ in what they can populate:
 
@@ -62,7 +64,8 @@ Commands:
 
 **Known asymmetries (inherent to the data, not bugs):**
 - `--json` raw records carry a **normalized envelope** so the cross-backend keys port: `sessionId`, `timestamp`, and `type`. So `jq .sessionId` and `select(.type=="user")` work identically across backends. Backend-native deep content remains under its original structure; Codex and Grok additionally preserve the original record kind as `itemType`.
-- `compact-summary` on opencode is a low-value boundary marker (`(compaction boundary; resumes at …)`) — opencode does not persist the generated compaction summary as searchable prose (verified: `session_context_epoch.baseline` is empty and no summary part is stored near the boundary), so that target can't be fully equivalent. The boundary marker is the best available.
+- `compact-summary` on OpenCode v1 exposes a boundary marker (`(compaction boundary; resumes at …)`). On v2 it searches the stored summary and any stored recent-context text; provider-native compaction payloads are not decoded into prose.
+- OpenCode v2 additionally maps system/skill updates and lifecycle events to `system`, agent changes to `agent-name`, and user file references to `attachment.file`. Its native `shell` tool supports `bash-command.shell`, `bash-output.shell`, and `tool-use.shell`. JSON records retain the native message under its original fields, with `itemType`, `id`, `seq`, `contentIndex`, and `slot` identifying the extracted facet.
 - opencode subagent sessions (`parent_id`) map to `subagent-prompt` / `--subagents` exactly like Claude.
 - Grok sessions whose summary kind starts with `subagent` map to `subagent-prompt` / `--subagents`; ordinary forks remain top-level sessions.
 
