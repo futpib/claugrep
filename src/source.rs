@@ -55,6 +55,26 @@ pub trait Source {
         keep_raw: bool,
     ) -> Vec<ExtractedContent>;
 
+    /// Visit records in order, stopping when the callback returns false.
+    /// Streaming backends can emit matches without first loading an entire
+    /// session, and stop reading once the search result limit is reached.
+    /// `literal_hint` permits skipping records that cannot contain this plain
+    /// ASCII text, provided decoding and tool-call correlation are preserved.
+    fn visit_content(
+        &self,
+        session: &SessionFile,
+        targets: &HashSet<Target>,
+        keep_raw: bool,
+        _literal_hint: Option<&str>,
+        on_record: &mut dyn FnMut(ExtractedContent) -> bool,
+    ) {
+        for record in self.extract_content(session, targets, keep_raw) {
+            if !on_record(record) {
+                break;
+            }
+        }
+    }
+
     /// Follow a live session, invoking `on_records` with each batch of newly
     /// arrived content. Blocks until interrupted (the caller installs the
     /// signal handler). The closure receives records already extracted and
@@ -181,6 +201,19 @@ impl Source for MultiSource {
                 "no source registered for backend '{}'",
                 session.backend
             )),
+        }
+    }
+
+    fn visit_content(
+        &self,
+        session: &SessionFile,
+        targets: &HashSet<Target>,
+        keep_raw: bool,
+        literal_hint: Option<&str>,
+        on_record: &mut dyn FnMut(ExtractedContent) -> bool,
+    ) {
+        if let Some(child) = self.child_for(session.backend) {
+            child.visit_content(session, targets, keep_raw, literal_hint, on_record);
         }
     }
 

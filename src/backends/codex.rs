@@ -17,6 +17,7 @@ pub const CODEX: &str = "codex";
 
 pub struct CodexSource {
     pub home: PathBuf,
+    transcript_homes: Vec<PathBuf>,
     rollouts: OnceLock<Vec<RolloutMeta>>,
 }
 
@@ -32,9 +33,26 @@ struct RolloutMeta {
 impl CodexSource {
     pub fn new(home: PathBuf) -> Self {
         Self {
+            transcript_homes: vec![home.clone()],
             home,
             rollouts: OnceLock::new(),
         }
+    }
+
+    /// Account-specific CODEX_HOME must not hide the conventional transcript
+    /// store. Explicit --codex-home still selects exactly one store; memory
+    /// discovery remains scoped to the active home in either case.
+    pub fn with_default_transcripts(mut self) -> Self {
+        let default = dirs::home_dir().expect("no home dir").join(".codex");
+        let active = self.home.canonicalize().unwrap_or_else(|_| self.home.clone());
+        if default.canonicalize().unwrap_or_else(|_| default.clone()) != active {
+            self.transcript_homes.push(default);
+        }
+        self
+    }
+
+    pub fn has_available_store(&self) -> bool {
+        self.transcript_homes.iter().any(|home| Self::is_available(home))
     }
 
     pub fn default_home() -> PathBuf {
@@ -52,7 +70,11 @@ impl CodexSource {
     fn rollouts(&self) -> &[RolloutMeta] {
         self.rollouts.get_or_init(|| {
             let mut files = Vec::new();
-            collect_jsonl(&self.home.join("sessions"), &mut files);
+            for home in &self.transcript_homes {
+                collect_jsonl(&home.join("sessions"), &mut files);
+            }
+            let mut seen = HashSet::new();
+            files.retain(|path| seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())));
             files.into_iter().filter_map(read_meta).collect()
         })
     }
@@ -245,18 +267,20 @@ fn normalize_custom_call(name: &str, text: &str) -> (String, String) {
     if name != "exec" {
         return (name.to_string(), text.to_string());
     }
-    let nested = regex::Regex::new(r"tools\.([A-Za-z0-9_]+)\s*\(")
-        .ok()
-        .and_then(|re| re.captures(text))
+    static NESTED_CALL: OnceLock<regex::Regex> = OnceLock::new();
+    let nested = NESTED_CALL
+        .get_or_init(|| regex::Regex::new(r"tools\.([A-Za-z0-9_]+)\s*\(").unwrap())
+        .captures(text)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string());
     let Some(nested) = nested else {
         return (name.to_string(), text.to_string());
     };
     if nested == "apply_patch" {
-        let patch = regex::Regex::new(r#"(?s)const\s+patch\s*=\s*(\"(?:\\.|[^\"\\])*\")\s*;"#)
-            .ok()
-            .and_then(|re| re.captures(text))
+        static PATCH: OnceLock<regex::Regex> = OnceLock::new();
+        let patch = PATCH
+            .get_or_init(|| regex::Regex::new(r#"(?s)const\s+patch\s*=\s*(\"(?:\\.|[^\"\\])*\")\s*;"#).unwrap())
+            .captures(text)
             .and_then(|c| c.get(1))
             .and_then(|m| serde_json::from_str::<String>(m.as_str()).ok())
             .unwrap_or_else(|| text.to_string());
@@ -278,7 +302,8 @@ fn shell_command(name: &str, text: &str) -> Option<String> {
     }
     // Current Codex custom `exec` records contain JavaScript wrapping an
     // exec_command call. Decode the JSON string literal used for its `cmd`.
-    let re = regex::Regex::new(r#"[\"']cmd[\"']\s*:\s*(\"(?:\\.|[^\"\\])*\")"#).ok()?;
+    static COMMAND: OnceLock<regex::Regex> = OnceLock::new();
+    let re = COMMAND.get_or_init(|| regex::Regex::new(r#"[\"']cmd[\"']\s*:\s*(\"(?:\\.|[^\"\\])*\")"#).unwrap());
     let literal = re.captures(text)?.get(1)?.as_str();
     serde_json::from_str::<String>(literal).ok()
 }
@@ -530,13 +555,50 @@ impl Source for CodexSource {
         targets: &HashSet<Target>,
         keep_raw: bool,
     ) -> Vec<ExtractedContent> {
+        let mut out = Vec::new();
+        self.visit_content(session, targets, keep_raw, None, &mut |record| {
+            out.push(record);
+            true
+        });
+        out
+    }
+
+    fn visit_content(
+        &self,
+        session: &SessionFile,
+        targets: &HashSet<Target>,
+        keep_raw: bool,
+        literal_hint: Option<&str>,
+        on_record: &mut dyn FnMut(ExtractedContent) -> bool,
+    ) {
         let file = match fs::File::open(&session.file_path) {
             Ok(f) => f,
-            Err(_) => return vec![],
+            Err(_) => return,
         };
         let mut out = Vec::new();
         let mut state = ExtractState::default();
-        for line in BufReader::new(file).lines().map_while(Result::ok) {
+        let mut reader = BufReader::new(file);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if !matches!(reader.read_line(&mut line), Ok(n) if n > 0) {
+                break;
+            }
+            if let Some(literal) = literal_hint {
+                // Letters, digits, spaces and underscores survive JSON encoding
+                // unchanged unless Unicode-escaped (including nested tool JSON).
+                // Calls must still seed result correlation; compaction can
+                // synthesize searchable text absent from the raw record.
+                if !line.contains(literal)
+                    && !line.contains(r"\u")
+                    && !line.contains("\"custom_tool_call\"")
+                    && !line.contains("\"function_call\"")
+                    && !line.contains("\"compacted\"")
+                    && !line.contains("\"context_compacted\"")
+                {
+                    continue;
+                }
+            }
             if let Ok(entry) = serde_json::from_str(&line) {
                 extract_entry(
                     &entry,
@@ -547,9 +609,13 @@ impl Source for CodexSource {
                     &mut state,
                     &mut out,
                 );
+                for record in out.drain(..) {
+                    if !on_record(record) {
+                        return;
+                    }
+                }
             }
         }
-        out
     }
 
     fn follow(

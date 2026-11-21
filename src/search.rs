@@ -212,11 +212,44 @@ where
 {
     let mut match_number = 0;
     let mut hit_cap = false;
+    // Only a restricted plain ASCII pattern can be used against raw JSON.
+    // Regexes, case folding, punctuation and control characters use the full
+    // decoder, as do searches needing neighboring records.
+    // Require a word too: normalized JSON numbers can acquire new digits or
+    // a lowercase exponent marker that was absent from the raw record.
+    let literal_hint = match options.patterns.as_slice() {
+        [pattern] if pattern.as_str().bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'_')
+            && pattern.as_str().as_bytes().windows(2).any(|pair| pair.iter().all(u8::is_ascii_alphabetic)) => {
+            Some(pattern.as_str())
+        }
+        _ => None,
+    };
 
     for session in sessions {
         if match_number >= options.max_results {
             hit_cap = true;
             break;
+        }
+
+        if options.context_offsets.is_empty() {
+            source.visit_content(
+                session,
+                &options.extract_targets,
+                options.json_output,
+                literal_hint,
+                &mut |content| {
+                    if match_number >= options.max_results {
+                        hit_cap = true;
+                        return false;
+                    }
+                    if let Some(result) = match_record(&content, options, match_number + 1) {
+                        match_number += 1;
+                        on_match(result);
+                    }
+                    true
+                },
+            );
+            continue;
         }
 
         let contents = source.extract_content(
@@ -231,41 +264,45 @@ where
                 break;
             }
 
-            if !options.targets.matches(&content.target, content.tool_name.as_deref()) {
-                continue;
-            }
-
-            if let Some(matched_lines) = find_matches(
-                &content.text,
-                &options.patterns,
-                options.context_before,
-                options.context_after,
-            ) {
+            if let Some(mut result) = match_record(content, options, match_number + 1) {
                 match_number += 1;
-                let context_records = gather_context(
+                result.context_records = gather_context(
                     &contents,
                     i,
                     &options.context_offsets,
                     options.context_type_filter.as_ref(),
                     options.json_output,
                 );
-                on_match(SearchMatch {
-                    match_number,
-                    session_id: content.session_id.clone(),
-                    timestamp: content.timestamp.clone(),
-                    target: content.target.clone(),
-                    tool_name: content.tool_name.clone(),
-                    text: content.text.clone(),
-                    matched_lines,
-                    edit_diff: content.edit_diff.clone(),
-                    raw_entry: content.raw_entry.clone(),
-                    context_records,
-                });
+                on_match(result);
             }
         }
     }
 
     (match_number, hit_cap)
+}
+
+fn match_record(content: &ExtractedContent, options: &SearchOptions, match_number: usize) -> Option<SearchMatch> {
+    if !options.targets.matches(&content.target, content.tool_name.as_deref()) {
+        return None;
+    }
+    let matched_lines = find_matches(
+        &content.text,
+        &options.patterns,
+        options.context_before,
+        options.context_after,
+    )?;
+    Some(SearchMatch {
+        match_number,
+        session_id: content.session_id.clone(),
+        timestamp: content.timestamp.clone(),
+        target: content.target.clone(),
+        tool_name: content.tool_name.clone(),
+        text: content.text.clone(),
+        matched_lines,
+        edit_diff: content.edit_diff.clone(),
+        raw_entry: content.raw_entry.clone(),
+        context_records: Vec::new(),
+    })
 }
 
 #[cfg(test)]

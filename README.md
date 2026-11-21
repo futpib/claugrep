@@ -4,7 +4,7 @@
 
 Browse, search, and export AI coding-agent conversation transcripts from the command line.
 
-`claugrep` reads transcripts from multiple backends — [Claude Code](https://claude.ai/code)'s per-session `.jsonl` files under `~/.claude/projects/`, Codex rollout files under `$CODEX_HOME/sessions` (normally `~/.codex/sessions`), [Grok Build](https://github.com/xai-org/grok-build) session updates under `$GROK_HOME/sessions` (normally `~/.grok/sessions`), and [opencode](https://opencode.ai)'s SQLite store at `~/.local/share/opencode/opencode.db` — and lets you grep across them, list sessions, or dump their content as plain text. By default every available backend is searched; pass `--backend claude`, `--backend codex`, `--backend grok`, or `--backend opencode` to select one.
+`claugrep` reads transcripts from multiple backends — [Claude Code](https://claude.ai/code)'s per-session `.jsonl` files under `~/.claude/projects/`, Codex rollout files under both `$CODEX_HOME/sessions` and `~/.codex/sessions`, [Grok Build](https://github.com/xai-org/grok-build) session updates under `$GROK_HOME/sessions` (normally `~/.grok/sessions`), and [opencode](https://opencode.ai)'s SQLite store at `~/.local/share/opencode/opencode.db` — and lets you grep across them, list sessions, or dump their content as plain text. By default every available backend is searched; pass `--backend claude`, `--backend codex`, `--backend grok`, or `--backend opencode` to select one.
 
 ## Installation
 
@@ -43,7 +43,7 @@ Commands:
 | Backend | Storage | Selection |
 |---------|---------|-----------|
 | `claude` | per-session `.jsonl` under `~/.claude/projects/` (+ claudex accounts) | `auto` or `--backend claude` |
-| `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions`; native memory under `$CODEX_HOME/memories` | auto-detected or `--backend codex`; override root with `--codex-home` |
+| `codex` | rollout `.jsonl` under `$CODEX_HOME/sessions` and `~/.codex/sessions`; native memory under `$CODEX_HOME/memories` | auto-detected or `--backend codex`; restrict to one root with `--codex-home` |
 | `grok` | ACP `updates.jsonl` + `summary.json` under `$GROK_HOME/sessions`; native memory under `$GROK_HOME/memory` | auto-detected or `--backend grok`; override root with `--grok-home` |
 | `opencode` | SQLite at `$XDG_DATA_HOME/opencode/opencode.db`: v1 `session`/`message`/`part`, v2 `session_v2`/`session_message` | auto-detected or `--backend opencode`; override path with `--opencode-db` |
 
@@ -53,6 +53,7 @@ OpenCode 1 and 2 use the same `--backend opencode` option. Schema detection supp
 
 **Content-type coverage.** The `-t/--targets` filters work uniformly, but backends differ in what they can populate:
 
+- Codex searches the active `$CODEX_HOME` and the conventional `~/.codex` transcript store together, deduplicating shared paths. An explicit `--codex-home` restricts discovery to that directory. Memory discovery stays scoped to the active home. Searches without record-level context stream records and stop at the result limit.
 - Codex populates `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, `subagent-prompt`, and `compact-summary`. Calls/results are correlated by call ID, wrapped shell/apply-patch calls are normalized to their underlying tool, and direct edit calls use the shared unified-diff renderer. Developer/system context and encrypted reasoning payloads are intentionally not exposed.
 - Claude, Grok, and opencode populate `user`, `assistant`, `thinking`, `bash-command`, `bash-output`, `tool-use`, `tool-result`, and `compact-summary`. Grok searches both recap prose and the complete summary stored by compaction checkpoints; background-task completions are surfaced as final tool or shell output.
 - Grok also maps its native plans, hooks, retries, memory/compaction lifecycle, tasks, subagents, scheduled tasks, image events, model changes, turn metadata, titles, agent name, and sandbox profile to `progress`, `system`, `attachment`, `queue-operation`, `mode`, `subagent-prompt`, `ai-title`, `agent-name`, and `permission-mode` as appropriate. Unknown future update kinds and malformed offline records produce path-specific warnings instead of disappearing silently.
@@ -78,7 +79,7 @@ These options are accepted by every subcommand. Subcommands ignore options they 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--backend <which>` | `auto` | Transcript backend(s): `auto` (every backend with data), `claude`, `codex`, `grok`, or `opencode` |
-| `--codex-home <path>` | `$CODEX_HOME` or `~/.codex` | Override the Codex data root |
+| `--codex-home <path>` | `$CODEX_HOME` plus `~/.codex` transcripts | Restrict Codex to one data root; memory defaults to `$CODEX_HOME` or `~/.codex` |
 | `--grok-home <path>` | `$GROK_HOME` or `~/.grok` | Override the Grok Build data root |
 | `--opencode-db <path>` | *XDG data dir* | Path to the opencode SQLite DB (`$XDG_DATA_HOME/opencode/opencode.db`) |
 | `--config-dir <path>` | `~/.claude` | Claude config directory (overrides `CLAUDE_CONFIG_DIR`) |

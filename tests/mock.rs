@@ -35,6 +35,10 @@ impl MockWorld {
         cmd.env("XDG_CONFIG_HOME", self.home.path().join(".config"));
         // Clear CLAUDE_CONFIG_DIR so it doesn't bleed between tests
         cmd.env_remove("CLAUDE_CONFIG_DIR");
+        // Keep the other auto-detected backends inside this mock HOME too.
+        cmd.env_remove("CODEX_HOME");
+        cmd.env_remove("GROK_HOME");
+        cmd.env("XDG_DATA_HOME", self.home.path().join(".local/share"));
         cmd
     }
 

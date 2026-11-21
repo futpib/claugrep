@@ -66,7 +66,7 @@ struct Cli {
     #[arg(long = "opencode-db", global = true, value_name = "PATH")]
     opencode_db: Option<PathBuf>,
 
-    /// Codex home directory (default: $CODEX_HOME or ~/.codex)
+    /// Restrict Codex to one home (default: $CODEX_HOME plus ~/.codex transcripts)
     #[arg(long = "codex-home", global = true, value_name = "PATH")]
     codex_home: Option<PathBuf>,
 
@@ -891,8 +891,12 @@ fn main() {
     if matches!(cli.backend, BackendSel::Auto | BackendSel::Codex) {
         let home = cli.codex_home.clone()
             .unwrap_or_else(backends::codex::CodexSource::default_home);
-        if backends::codex::CodexSource::is_available(&home) {
-            children.push(Box::new(backends::codex::CodexSource::new(home)));
+        let mut codex = backends::codex::CodexSource::new(home.clone());
+        if cli.codex_home.is_none() {
+            codex = codex.with_default_transcripts();
+        }
+        if codex.has_available_store() {
+            children.push(Box::new(codex));
         } else if matches!(cli.backend, BackendSel::Codex) {
             eprintln!("error: --backend codex selected but no sessions, memories, or AGENTS.md found under {}; pass --codex-home <path>", home.display());
             std::process::exit(2);
@@ -1142,34 +1146,33 @@ fn main() {
                     };
                     total_sessions_searched += resolved.len();
 
-                    // Buffer per-project results so we only emit a project header
-                    // (multi mode) when at least one match landed.
-                    let mut project_lines: Vec<String> = vec![];
+                    // Print the header lazily on the first match so results are
+                    // visible before the rest of a large project is scanned.
                     let mut first_in_proj = true;
                     let proj_options = SearchOptions { max_results: remaining, ..options.clone() };
                     let (count, hit_cap) = search_sessions(source, &resolved, &proj_options, |m| {
-                        if !first_in_proj { project_lines.push(String::new()); }
+                        let mut out = stdout.lock();
+                        if first_in_proj {
+                            if !first_project_output { writeln!(out).unwrap(); }
+                            first_project_output = false;
+                            if let Some(label) = project_label {
+                                writeln!(out, "{}", format_project_header(label)).unwrap();
+                                writeln!(out).unwrap();
+                            }
+                        } else {
+                            writeln!(out).unwrap();
+                        }
                         first_in_proj = false;
                         let rendered = match (&m.edit_diff, no_diff) {
                             (Some(diff), false) => format_diff(&m, diff, &patterns, max_line_width, diff_ctx),
                             _ => format_match(&m, &patterns, max_line_width),
                         };
-                        project_lines.push(rendered);
+                        writeln!(out, "{}", rendered).unwrap();
+                        out.flush().unwrap();
                     });
                     if hit_cap { any_hit_cap = true; }
 
                     if count > 0 {
-                        let mut out = stdout.lock();
-                        if !first_project_output { writeln!(out).unwrap(); }
-                        first_project_output = false;
-                        if let Some(label) = project_label {
-                            writeln!(out, "{}", format_project_header(label)).unwrap();
-                            writeln!(out).unwrap();
-                        }
-                        for line in &project_lines {
-                            writeln!(out, "{}", line).unwrap();
-                        }
-                        out.flush().unwrap();
                         projects_with_results += 1;
                     }
                     total_matches += count;
